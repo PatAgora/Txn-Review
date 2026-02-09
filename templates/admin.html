@@ -1,0 +1,270 @@
+{% extends "base.html" %}
+{% block page_title %}Rules & Settings{% endblock %}
+{% block content %}
+
+{# ---- Global rule parameters & thresholds ---- #}
+<form method="post" action="{{ url_for('admin_rule_params') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="card mb-4">
+    <div class="card-body">
+      <h5 class="card-title mb-3">Rule Parameters</h5>
+
+      <div class="row g-3">
+        <div class="col-md-3">
+          <label class="form-label">High-risk min amount (£)</label>
+          <input type="number" step="0.01" class="form-control"
+                 name="cfg_high_risk_min_amount"
+                 value="{{ params['cfg_high_risk_min_amount'] }}">
+        </div>
+
+        <div class="col-md-3">
+          <label class="form-label">Outlier vs median (×)</label>
+          <input type="number" step="0.1" class="form-control"
+                 name="cfg_median_multiplier"
+                 value="{{ params['cfg_median_multiplier'] }}">
+        </div>
+
+        <div class="col-md-3">
+          <label class="form-label">Expected OUT factor (×)</label>
+          <input type="number" step="0.1" class="form-control"
+                 name="cfg_expected_out_factor"
+                 value="{{ params['cfg_expected_out_factor'] }}">
+        </div>
+
+        <div class="col-md-3">
+          <label class="form-label">Expected IN factor (×)</label>
+          <input type="number" step="0.1" class="form-control"
+                 name="cfg_expected_in_factor"
+                 value="{{ params['cfg_expected_in_factor'] }}">
+        </div>
+      </div>
+
+      <div class="row g-3 mt-1">
+        <div class="col-md-3">
+          <label class="form-label">Cash daily limit (£, global)</label>
+          <input type="number" step="0.01" class="form-control"
+                 name="cfg_cash_daily_limit"
+                 value="{{ params['cfg_cash_daily_limit'] }}">
+        </div>
+
+        <div class="col-md-3">
+          <label class="form-label">Severity: Critical ≥</label>
+          <input type="number" class="form-control"
+                 name="cfg_sev_critical"
+                 value="{{ params['cfg_sev_critical'] }}">
+        </div>
+
+        <div class="col-md-3">
+          <label class="form-label">Severity: High ≥</label>
+          <input type="number" class="form-control"
+                 name="cfg_sev_high"
+                 value="{{ params['cfg_sev_high'] }}">
+        </div>
+
+        <div class="col-md-3">
+          <label class="form-label">Severity: Medium ≥</label>
+          <input type="number" class="form-control"
+                 name="cfg_sev_medium"
+                 value="{{ params['cfg_sev_medium'] }}">
+        </div>
+      </div>
+
+      <div class="row g-3 mt-1">
+        <div class="col-md-3">
+          <label class="form-label">Severity: Low ≥</label>
+          <input type="number" class="form-control"
+                 name="cfg_sev_low"
+                 value="{{ params['cfg_sev_low'] }}">
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <button class="btn btn-primary">Save Parameters</button>
+      </div>
+    </div>
+  </div>
+
+  {# ---- Keyword Library (Narrative Risk) ---- #}
+  <div class="card mb-4">
+    <div class="card-body">
+      <h5 class="card-title mb-3">Keyword Library (Narrative Risk)</h5>
+
+      <div class="d-flex gap-2 mb-3">
+        <input type="text" class="form-control" name="new_term" placeholder="Add keyword…">
+        <button formaction="{{ url_for('admin_keywords') }}" name="action" value="add" class="btn btn-success">
+          Add
+        </button>
+      </div>
+
+      <table class="table table-sm table-striped align-middle">
+        <thead>
+          <tr>
+            <th class="u-w-80">On</th>
+            <th>Keyword</th>
+            <th class="u-w-120">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set kws = params['cfg_risky_terms2'] or [] %}
+          {% for item in kws %}
+          <tr>
+            <td>
+              <form method="post" action="{{ url_for('admin_keywords') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="toggle">
+                <input type="hidden" name="term" value="{{ item['term'] }}">
+                <div class="form-check form-switch">
+                  <input class="form-check-input" type="checkbox"
+                         {% if item.get('enabled') %}checked{% endif %}
+                         onchange="this.form.submit()">
+                </div>
+              </form>
+            </td>
+            <td>{{ item['term'] }}</td>
+            <td>
+              <form method="post" action="{{ url_for('admin_keywords') }}"
+                    onsubmit="return confirm('Delete keyword {{ item['term'] }}?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="term" value="{{ item['term'] }}">
+                <button class="btn btn-sm btn-danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3" class="text-muted">No keywords configured.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {# ---- AI Analysis toggles (persisted by /admin/rule-params in your app) ---- #}
+  <div class="card mb-4">
+    <div class="card-body">
+      <h5 class="card-title mb-3">AI Analysis</h5>
+
+      <div class="form-check form-switch mb-3">
+        <input class="form-check-input" type="checkbox" id="ai_on"
+               name="cfg_ai_use_llm"
+               {% if params['cfg_ai_use_llm'] %}checked{% endif %}>
+        <label class="form-check-label" for="ai_on">Normalise outreach questions with AI</label>
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label">AI model</label>
+        <input type="text" class="form-control" name="cfg_ai_model"
+               value="{{ params['cfg_ai_model'] }}">
+        <div class="form-text">Default: gpt-4o-mini</div>
+      </div>
+
+      <button class="btn btn-primary">Save AI Settings</button>
+    </div>
+  </div>
+</form>
+
+{# ---- Built-in rule toggles ---- #}
+<form method="post" action="{{ url_for('admin_rule_toggles') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <div class="card mb-4" id="builtin-rules">
+    <div class="card-body">
+      <h5 class="card-title mb-3">Built-in Rules</h5>
+
+      <div class="row g-3">
+        {% macro sw(id,label,checked) -%}
+        <div class="col-md-3">
+          <div class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" id="{{ id }}" name="{{ id }}"
+                   {% if checked %}checked{% endif %}>
+            <label class="form-check-label" for="{{ id }}">{{ label }}</label>
+          </div>
+        </div>
+        {%- endmacro %}
+
+        {{ sw('enable_prohibited_country','Prohibited country', toggles['prohibited_country']) }}
+        {{ sw('enable_high_risk_corridor','High-risk corridor', toggles['high_risk_corridor']) }}
+        {{ sw('enable_median_outlier','Outlier vs median', toggles['median_outlier']) }}
+        {{ sw('enable_nlp_risky_terms','Narrative risky terms', toggles['nlp_risky_terms']) }}
+        {{ sw('enable_expected_out','Expected OUT breach', toggles['expected_out']) }}
+        {{ sw('enable_expected_in','Expected IN breach', toggles['expected_in']) }}
+        {{ sw('enable_cash_daily_breach','Cash daily breach', toggles['cash_daily_breach']) }}
+        {{ sw('enable_severity_mapping','Severity mapping', toggles['severity_mapping']) }}
+      </div>
+
+      <div class="mt-3">
+        <button class="btn btn-primary">Save Toggles</button>
+      </div>
+
+      <hr class="my-4">
+
+      <h6 class="mb-2">Catalog</h6>
+      <div class="table-responsive">
+        <table class="table table-sm table-striped">
+          <thead>
+            <tr>
+              <th>Category</th><th>Rule</th><th>Trigger</th><th>Impact</th>
+              <th>Tags</th><th>Outcome</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in builtin_rules %}
+            <tr>
+              <td>{{ r.category }}</td>
+              <td>{{ r.rule }}</td>
+              <td class="text-muted">{{ r.trigger }}</td>
+              <td>{{ r.impact }}</td>
+              <td>{{ r.tags }}</td>
+              <td>{{ r.outcome }}</td>
+              <td class="text-muted">{{ r.description }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</form>
+
+{# ---- Optional: Rules table import/edit (if you’re using admin_rules / admin_rules_bulk) ---- #}
+<div class="card mb-4" id="rules">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Rules table (advanced)</h5>
+
+    <form method="post" action="{{ url_for('admin_rules_bulk') }}" enctype="multipart/form-data" class="d-flex gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="file" name="rules_file" accept=".xlsx,.xls" class="form-control">
+      <button class="btn btn-secondary" name="action" value="reload">Reload from Excel</button>
+      <button class="btn btn-outline-danger" name="action" value="wipe"
+              onclick="return confirm('Delete ALL rules?');">Wipe rules</button>
+    </form>
+
+    <div class="form-text mt-2">Expected columns (flexible headers accepted): Category, Rule, Trigger Condition, Score Impact, Tags, Outcome, Description.</div>
+  </div>
+</div>
+
+{# ---- Danger Zone (requires admin_wipe route to exist) ---- #}
+<div class="card border-danger mb-5">
+  <div class="card-header bg-danger text-white">Danger zone</div>
+  <div class="card-body">
+    <p class="mb-3">
+      Permanently deletes <strong>all transactions</strong>, related <strong>alerts</strong>, and AI cases/answers.
+      This cannot be undone.
+    </p>
+    <form method="post" action="{{ url_for('admin_wipe') }}"
+          onsubmit="return confirm('Delete ALL transactions, alerts, and AI cases?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label">Type <code>WIPE</code> to confirm</label>
+          <input type="text" name="confirm" class="form-control" placeholder="WIPE" pattern="WIPE" required>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-danger">Delete all transactions</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}

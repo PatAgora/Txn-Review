@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% block title %}Transaction Review Report - {{ customer_id }}{% endblock %}
+{% block page_title %}Transaction Review Report{% endblock %}
+
+{% block content %}
+<link href="/static/css/report_preview.css" rel="stylesheet">
+
+<!-- Action Bar -->
+<div class="action-bar">
+  <div>
+    <a href="{{ url_for('dashboard', customer_id=customer_id) }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
+    </a>
+    <a href="{{ url_for('ai_rationale', customer_id=customer_id) }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-robot me-1"></i>AI Rationale
+    </a>
+  </div>
+  <div>
+    <button type="button" class="btn btn-outline-primary btn-sm" onclick="window.print()">
+      <i class="bi bi-printer me-1"></i>Print
+    </button>
+    <button type="submit" form="reportForm" class="btn btn-success btn-sm">
+      <i class="bi bi-download me-1"></i>Download PDF
+    </button>
+  </div>
+</div>
+
+<div class="container-fluid py-4">
+  <form id="reportForm" method="POST" action="{{ url_for('generate_pdf_report', customer_id=customer_id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    
+    <div class="report-container">
+      <!-- Report Header -->
+      <div class="report-header">
+        <h1>TRANSACTION REVIEW REPORT</h1>
+        <div class="subtitle">Confidential - For Compliance Use Only</div>
+      </div>
+      
+      <div class="report-body">
+        
+        <!-- Section 1: Review Details -->
+        <div class="report-section">
+          <div class="report-section-title">1. Review Details</div>
+          <table class="report-table">
+            <tr>
+              <td class="label">Customer ID</td>
+              <td class="value"><strong>{{ customer_id }}</strong></td>
+              <td class="label">Review Date</td>
+              <td class="value">{{ report_date }} {{ report_time }}</td>
+            </tr>
+            <tr>
+              <td class="label">Reviewer</td>
+              <td class="value">{{ reviewer_name }}</td>
+              <td class="label">Period Covered</td>
+              <td class="value">{{ first_txn_formatted }} to {{ last_txn_formatted }}</td>
+            </tr>
+          </table>
+        </div>
+        
+        <!-- Section 2: Customer Profile -->
+        <div class="report-section">
+          <div class="report-section-title">2. Customer Profile</div>
+          <table class="report-table">
+            <tr>
+              <td class="label">Nature of Business</td>
+              <td class="value">{{ nature_of_business or 'Not specified' }}</td>
+            </tr>
+            <tr>
+              <td class="label">Expected Monthly Income</td>
+              <td class="value">{% if est_income %}£{{ "{:,.2f}".format(est_income) }}{% else %}Not specified{% endif %}</td>
+            </tr>
+            <tr>
+              <td class="label">Expected Monthly Expenditure</td>
+              <td class="value">{% if est_expenditure %}£{{ "{:,.2f}".format(est_expenditure) }}{% else %}Not specified{% endif %}</td>
+            </tr>
+          </table>
+        </div>
+        
+        <!-- Section 3: Account Metrics -->
+        <div class="report-section">
+          <div class="report-section-title">3. Account Metrics Summary</div>
+          
+          <h6 class="text-muted mb-3">Transaction Volumes</h6>
+          <table class="report-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th class="number">Credits (In)</th>
+                <th class="number">Debits (Out)</th>
+                <th class="number">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="label">Total Value</td>
+                <td class="number">£{{ "{:,.2f}".format(total_in) }}</td>
+                <td class="number">£{{ "{:,.2f}".format(total_out) }}</td>
+                <td class="number"><strong>£{{ "{:,.2f}".format(total_value) }}</strong></td>
+              </tr>
+              <tr>
+                <td class="label">Average Value</td>
+                <td class="number">£{{ "{:,.2f}".format(avg_in) }}</td>
+                <td class="number">£{{ "{:,.2f}".format(avg_out) }}</td>
+                <td class="number">-</td>
+              </tr>
+              <tr>
+                <td class="label">Largest Single</td>
+                <td class="number">£{{ "{:,.2f}".format(max_in) }}</td>
+                <td class="number">£{{ "{:,.2f}".format(max_out) }}</td>
+                <td class="number">-</td>
+              </tr>
+              <tr>
+                <td class="label">Transaction Count</td>
+                <td class="number">{{ count_in }}</td>
+                <td class="number">{{ count_out }}</td>
+                <td class="number"><strong>{{ txn_count }}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+          
+          <h6 class="text-muted mb-3 mt-4">Cash & International Activity</h6>
+          <table class="report-table">
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th class="number">Value</th>
+                <th class="number">% of Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="label">Cash Deposits</td>
+                <td class="number">£{{ "{:,.2f}".format(cash_in) }}</td>
+                <td class="number">{{ "{:.1f}".format(cash_in / total_value * 100 if total_value > 0 else 0) }}%</td>
+              </tr>
+              <tr>
+                <td class="label">Cash Withdrawals</td>
+                <td class="number">£{{ "{:,.2f}".format(cash_out) }}</td>
+                <td class="number">{{ "{:.1f}".format(cash_out / total_value * 100 if total_value > 0 else 0) }}%</td>
+              </tr>
+              <tr>
+                <td class="label">Overseas Activity</td>
+                <td class="number">£{{ "{:,.2f}".format(overseas) }}</td>
+                <td class="number">{{ "{:.1f}".format(overseas_pct) }}%</td>
+              </tr>
+              <tr>
+                <td class="label">High-Risk Corridors</td>
+                <td class="number">£{{ "{:,.2f}".format(hr_val) }}</td>
+                <td class="number">{{ "{:.1f}".format(hr_pct) }}%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        
+        <!-- Section 4: Alert Summary -->
+        <div class="report-section">
+          <div class="report-section-title">4. Alert Summary</div>
+          
+          <p><strong>Total Alerts Generated:</strong> {{ total_alerts }}</p>
+          
+          {% if severity_counts %}
+          <h6 class="text-muted mb-2">By Severity</h6>
+          <div class="mb-3">
+            {% for row in severity_counts %}
+              <span class="alert-badge {{ row.severity|lower }}">{{ row.severity }}: {{ row.cnt }}</span>
+            {% endfor %}
+          </div>
+          {% endif %}
+          
+          {% if tag_counts %}
+          <h6 class="text-muted mb-2">By Type</h6>
+          <table class="report-table">
+            <thead>
+              <tr>
+                <th>Alert Type</th>
+                <th class="number" class="u-w-80">Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for tag, cnt in tag_counts.items() %}
+              <tr>
+                <td>{{ tag.replace('_', ' ').title() }}</td>
+                <td class="number">{{ cnt }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+        </div>
+        
+        <!-- Section 5: Customer Outreach -->
+        <div class="report-section">
+          <div class="report-section-title">5. Customer Outreach</div>
+          
+          {% if answers %}
+          <p>
+            <strong>Questions Sent:</strong> {{ answers|length }} |
+            <strong>Answered:</strong> {{ answered_count }} |
+            <strong>Outstanding:</strong> {{ outstanding_count }}
+          </p>
+          
+          {% for ans in answers %}
+          <div class="qa-item">
+            <div class="question">
+              <span class="tag">{{ ans.tag.replace('_', ' ').title() if ans.tag else 'General' }}</span>
+              Q{{ loop.index }}: {{ ans.question }}
+            </div>
+            {% if ans.answer and ans.answer.strip() %}
+            <div class="answer">
+              <strong>A{{ loop.index }}:</strong> {{ ans.answer }}
+            </div>
+            {% else %}
+            <div class="answer no-response">
+              <strong>A{{ loop.index }}:</strong> [No response received]
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+          
+          {% else %}
+          <p class="text-muted">No outreach questions have been sent for this customer.</p>
+          {% endif %}
+        </div>
+        
+        <!-- Section 6: Reviewer Comments -->
+        <div class="report-section">
+          <div class="report-section-title">6. Reviewer Comments & Conclusion</div>
+          
+          <div class="comments-section">
+            <label for="summary_comments" class="form-label fw-bold">
+              Enter your review conclusion, risk assessment, and recommended actions:
+            </label>
+            <textarea 
+              id="summary_comments" 
+              name="summary_comments" 
+              placeholder="Enter your summary comments here. This will be included in Section 6 of the PDF report.
+
+Consider including:
+- Overall risk assessment (High/Medium/Low)
+- Whether activity is consistent with customer profile
+- Red flags identified and how they were addressed
+- Recommended next steps (e.g., escalate to MLRO, file SAR, enhanced monitoring, close with no action)
+- Next review date"></textarea>
+            <div class="print-comments" class="u-print-comments">
+              <!-- This will show the comments when printing -->
+            </div>
+          </div>
+        </div>
+        
+      </div>
+      
+      <!-- Report Footer -->
+      <div class="report-footer">
+        <div>Report generated by <strong>Scrutinise TXN</strong> | {{ report_date }} {{ report_time }}</div>
+        <div>This document is confidential and intended for compliance review purposes only.</div>
+      </div>
+      
+    </div>
+    
+  </form>
+</div>
+
+<script>
+// Copy comments to print area before printing
+window.addEventListener('beforeprint', function() {
+  const textarea = document.getElementById('summary_comments');
+  const printArea = document.querySelector('.print-comments');
+  if (textarea && printArea) {
+    printArea.textContent = textarea.value || '[No comments provided]';
+    printArea.style.display = 'block';
+  }
+});
+</script>
+{% endblock %}

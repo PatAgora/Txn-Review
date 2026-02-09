@@ -1,0 +1,16 @@
+id,txn_date,customer_id,direction,amount,currency,base_amount,country_iso2,payer_sort_code,payee_sort_code,channel,narrative
+TXN-002-001,05/01/2025,CUST002,in,75000.00,GBP,75000.00,GB,20-10-10,50-00-02,wire,Freight contract payment
+TXN-002-002,06/01/2025,CUST002,out,32000.00,GBP,32000.00,NL,,50-00-02,wire,Rotterdam port fees
+TXN-002-003,08/01/2025,CUST002,in,18500.00,GBP,18500.00,IE,93-00-01,50-00-02,wire,Dublin branch transfer
+TXN-002-004,10/01/2025,CUST002,out,45000.00,GBP,45000.00,SG,,50-00-02,wire,Singapore shipping line
+TXN-002-005,12/01/2025,CUST002,in,92000.00,GBP,92000.00,US,,50-00-02,wire,Major US client contract
+TXN-002-006,14/01/2025,CUST002,out,8500.00,GBP,8500.00,GB,50-00-02,,cash,Driver payments cash
+TXN-002-007,15/01/2025,CUST002,out,15000.00,GBP,15000.00,GB,50-00-02,30-20-10,wire,Insurance premium
+TXN-002-008,17/01/2025,CUST002,in,28000.00,GBP,28000.00,DE,,50-00-02,wire,German logistics partner
+TXN-002-009,19/01/2025,CUST002,out,62000.00,GBP,62000.00,CN,,50-00-02,wire,China freight forwarding
+TXN-002-010,21/01/2025,CUST002,in,41000.00,GBP,41000.00,GB,40-50-60,50-00-02,wire,UK warehouse rental income
+TXN-002-011,23/01/2025,CUST002,out,9200.00,GBP,9200.00,GB,50-00-02,,cash,Cash for urgent repairs
+TXN-002-012,25/01/2025,CUST002,in,55000.00,GBP,55000.00,JP,,50-00-02,wire,Tokyo office remittance
+TXN-002-013,27/01/2025,CUST002,out,28500.00,GBP,28500.00,IN,,50-00-02,wire,Mumbai subcontractor
+TXN-002-014,29/01/2025,CUST002,in,33000.00,GBP,33000.00,AU,,50-00-02,wire,Australian partner payment
+TXN-002-015,31/01/2025,CUST002,out,12000.00,GBP,12000.00,GB,50-00-02,20-30-40,wire,Monthly office costs

@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block page_title %}AI Outreach{% endblock %}
+{% block content %}
+
+<!-- Hidden period value - always use all -->
+<input type="hidden" id="default-period" value="all">
+
+{% if customer_id %}
+<div class="alert alert-info py-2 d-flex align-items-center justify-content-between">
+  <div>
+    Prepared questions are based on all alerts for <strong>{{ customer_id }}</strong>.
+  </div>
+</div>
+{% endif %}
+
+<!-- Action buttons -->
+<div class="d-flex gap-2 mb-3">
+  <form method="post" class="d-inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="customer_id" value="{{ customer_id or '' }}">
+    <input type="hidden" name="period" value="all">
+    <input type="hidden" name="action" value="build">
+    <button class="btn btn-primary">
+      Prepare Questions
+    </button>
+  </form>
+
+  <form method="post" class="d-inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="customer_id" value="{{ customer_id or '' }}">
+    <input type="hidden" name="period" value="all">
+    <input type="hidden" name="case_id" value="{{ case.id if case else '' }}">
+    <input type="hidden" name="action" value="outreach">
+    <button class="btn btn-secondary">
+      Build Outreach Pack
+    </button>
+  </form>
+</div>
+
+{% if case and answers %}
+<!-- Questions & Responses Card -->
+<div class="card mb-3">
+  <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+    <span>Questions & Responses — Case #{{ case.id }}</span>
+    <span class="badge bg-secondary">{{ answers|length }} question(s)</span>
+  </div>
+  <div class="card-body">
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="customer_id" value="{{ customer_id or '' }}">
+      <input type="hidden" name="period" value="all">
+      <input type="hidden" name="case_id" value="{{ case.id }}">
+      <input type="hidden" name="action" value="save">
+      
+      {% for r in answers %}
+      <div class="mb-4 pb-3 {% if not loop.last %}border-bottom{% endif %}">
+        <div class="d-flex justify-content-between align-items-start mb-2">
+          <strong>{{ loop.index }}. {{ r.question_nice or r.question }}</strong>
+        </div>
+        <input type="hidden" name="qid" value="{{ r.id }}">
+        <textarea class="form-control" name="answer_{{ r.id }}" rows="3" 
+                  placeholder="Enter customer response or notes...">{{ r.answer or '' }}</textarea>
+      </div>
+      {% endfor %}
+      
+      <button type="submit" class="btn btn-success">
+        <i class="fas fa-save me-1"></i> Save Responses
+      </button>
+    </form>
+  </div>
+</div>
+{% elif not case %}
+<div class="alert alert-secondary py-2 mb-3">
+  No questions prepared yet. Click <em>Prepare Questions</em> to generate questions based on alerts.
+</div>
+{% endif %}
+
+{% if outreach_text %}
+<div class="card mb-3">
+  <div class="card-header fw-semibold">Draft Outreach Email</div>
+  <div class="card-body">
+    <p class="text-muted small mb-2">Copy/paste into your email tool (or export later):</p>
+    <pre class="mb-0" class="u-prewrap">{{ outreach_text }}</pre>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

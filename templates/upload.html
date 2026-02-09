@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block page_title %}Upload Statements{% endblock %}
+{% block content %}
+<p class="text-muted">
+  Upload transaction statements for a specific customer. Select a customer first, then upload their transaction CSV.
+</p>
+
+{% if not customers %}
+<div class="alert alert-warning">
+  <strong>No customers available.</strong> 
+  {% if current_user and current_user.role == 'admin' %}
+    Please <a href="{{ url_for('admin_customers') }}">add customers</a> first before uploading statements.
+  {% else %}
+    Please ask an admin to add customers to the system.
+  {% endif %}
+</div>
+{% else %}
+
+<!-- Customer Selection & Upload Form -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Upload Transaction Statement</h5>
+    
+    <form method="post" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="row g-3 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label">Select Customer *</label>
+          <select name="customer_id" class="form-select" required onchange="window.location.href='{{ url_for('upload') }}?customer_id=' + this.value">
+            <option value="">-- Select a customer --</option>
+            {% for c in customers %}
+            <option value="{{ c.customer_id }}" {% if selected_customer == c.customer_id %}selected{% endif %}>
+              {{ c.customer_id }}{% if c.customer_name %} - {{ c.customer_name }}{% endif %}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-5">
+          <label class="form-label">Transaction CSV File *</label>
+          <input class="form-control" type="file" name="tx_file" accept=".csv" {% if not selected_customer %}disabled{% endif %}>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-primary w-100" {% if not selected_customer %}disabled{% endif %}>
+            Upload & Process
+          </button>
+        </div>
+      </div>
+    </form>
+    
+    {% if not selected_customer %}
+    <div class="alert alert-info mt-3 mb-0">
+      Select a customer to enable file upload.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Statement History for Selected Customer -->
+{% if selected_customer %}
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Statement History for {{ selected_customer }}</h5>
+    
+    {% if statements %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped">
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Uploaded By</th>
+            <th>Uploaded At</th>
+            <th>Records</th>
+            <th>Date Range</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in statements %}
+          <tr>
+            <td>{{ s.filename or '—' }}</td>
+            <td>{{ s.uploaded_by_name or '—' }}</td>
+            <td>{{ s.uploaded_at[:16] if s.uploaded_at else '—' }}</td>
+            <td>{{ s.record_count or 0 }}</td>
+            <td>
+              {% if s.date_from and s.date_to %}
+                {{ s.date_from }} to {{ s.date_to }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-muted mb-0">No statements uploaded yet for this customer.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% endif %}
+
+<!-- CSV Format Reference -->
+<div class="card">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Transaction CSV Format</h5>
+    <p class="text-muted small">
+      All transactions in the CSV must have the same <code>customer_id</code> as the selected customer.
+    </p>
+    
+    <div class="table-responsive">
+      <table class="table table-sm">
+        <thead>
+          <tr>
+            <th>Column</th>
+            <th>Required</th>
+            <th>Description</th>
+            <th>Example</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>id</code></td><td>Yes</td><td>Unique transaction ID</td><td>TXN-001</td></tr>
+          <tr><td><code>txn_date</code></td><td>Yes</td><td>Transaction date</td><td>15/01/2024</td></tr>
+          <tr><td><code>customer_id</code></td><td>Yes</td><td>Must match selected customer</td><td>CUST001</td></tr>
+          <tr><td><code>direction</code></td><td>Yes</td><td><code>in</code> or <code>out</code></td><td>in</td></tr>
+          <tr><td><code>amount</code></td><td>Yes</td><td>Original amount</td><td>5000.00</td></tr>
+          <tr><td><code>currency</code></td><td>No</td><td>Currency code (default: GBP)</td><td>GBP</td></tr>
+          <tr><td><code>base_amount</code></td><td>Yes</td><td>Amount in GBP</td><td>5000.00</td></tr>
+          <tr><td><code>country_iso2</code></td><td>No</td><td>Counterparty country</td><td>US</td></tr>
+          <tr><td><code>payer_sort_code</code></td><td>No</td><td>Payer's sort code</td><td>40-00-01</td></tr>
+          <tr><td><code>payee_sort_code</code></td><td>No</td><td>Payee's sort code</td><td>20-00-00</td></tr>
+          <tr><td><code>channel</code></td><td>No</td><td>Payment channel</td><td>wire, cash, card</td></tr>
+          <tr><td><code>narrative</code></td><td>No</td><td>Transaction description</td><td>Invoice payment</td></tr>
+        </tbody>
+      </table>
+    </div>
+    
+    <h6 class="mt-4">Sample CSV</h6>
+    <pre class="bg-light p-3 rounded small"><code>id,txn_date,customer_id,direction,amount,currency,base_amount,country_iso2,payer_sort_code,payee_sort_code,channel,narrative
+TXN-001,15/01/2024,CUST001,in,5000.00,GBP,5000.00,GB,40-00-01,,wire,Client payment - Project Alpha
+TXN-002,16/01/2024,CUST001,out,1200.00,GBP,1200.00,GB,,20-00-00,online,Supplier invoice #INV-789
+TXN-003,17/01/2024,CUST001,out,3500.00,USD,2800.00,US,,,,Wire to US partner</code></pre>
+  </div>
+</div>
+
+{% endblock %}

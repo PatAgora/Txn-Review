@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}AI Rationale{% endblock %}
+{% block page_title %}AI Rationale{% endblock %}
+
+{% block content %}
+
+{% if customer_id %}
+  <!-- Analyst inputs (POST) -->
+  <form method="post" action="{{ url_for('ai_rationale') }}" class="card mb-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="customer_id" value="{{ customer_id }}">
+    <input type="hidden" name="period" value="all">
+    <input type="hidden" name="action" value="generate">
+    <div class="card-header fw-semibold">Analyst Inputs</div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12">
+          <label class="form-label">Nature of business</label>
+          <input type="text" class="form-control" name="nature_of_business"
+                 placeholder="e.g., Building supplies"
+                 value="{{ nature_of_business or '' }}">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Estimated monthly income (£)</label>
+          <input type="text" class="form-control" name="est_income" inputmode="decimal"
+                 placeholder="e.g., 11000" value="{{ est_income or '' }}">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Estimated monthly expenditure (£)</label>
+          <input type="text" class="form-control" name="est_expenditure" inputmode="decimal"
+                 placeholder="e.g., 7500" value="{{ est_expenditure or '' }}">
+        </div>
+      </div>
+    </div>
+    <div class="card-footer d-flex gap-2">
+      <button class="btn btn-primary">Generate Rationale</button>
+      {% if rationale_text %}
+        <button class="btn btn-outline-secondary" type="button" id="copyBtn">Copy to clipboard</button>
+        <a href="{{ url_for('report_preview', customer_id=customer_id) }}" class="btn btn-success">
+          <i class="bi bi-file-earmark-pdf me-1"></i>Generate PDF Report
+        </a>
+      {% endif %}
+    </div>
+  </form>
+
+  <!-- Outreach preview -->
+  {% if answers_preview and answers_preview|length %}
+  <div class="card mb-3">
+    <div class="card-header fw-semibold">Outreach Status</div>
+    <div class="card-body">
+      {% set n_ans = answers_preview | selectattr('answer') | map(attribute='answer') | select('string') | list | length %}
+      {% if n_ans > 0 %}
+        <span class="badge text-bg-success">{{ n_ans }} response{{ '' if n_ans==1 else 's' }} recorded</span>
+      {% else %}
+        <span class="badge text-bg-secondary">Responses not yet recorded</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Output -->
+  <div class="card">
+    <div class="card-header fw-semibold">Rationale Output</div>
+    <div class="card-body">
+      {% if rationale_text %}
+        <pre class="mb-0" id="rationaleOut" class="u-prewrap">{{ rationale_text }}</pre>
+      {% else %}
+        <p class="text-muted mb-0">Fill in any analyst inputs above and click <strong>Generate Rationale</strong>.</p>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="card">
+    <div class="card-body">
+      <p class="mb-0 text-muted">Enter a <strong>Customer ID</strong> to begin.</p>
+    </div>
+  </div>
+{% endif %}
+
+<script>
+  const copyBtn = document.getElementById('copyBtn');
+  if (copyBtn) {
+    copyBtn.addEventListener('click', async () => {
+      const el = document.getElementById('rationaleOut');
+      if (!el) return;
+      try {
+        await navigator.clipboard.writeText(el.innerText);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => copyBtn.textContent = 'Copy to clipboard', 1500);
+      } catch (e) {
+        alert('Copy failed. Select the text and copy manually.');
+      }
+    });
+  }
+</script>
+{% endblock %}

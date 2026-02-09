@@ -1,0 +1,21 @@
+id,txn_date,customer_id,direction,amount,currency,base_amount,country_iso2,payer_sort_code,payee_sort_code,channel,narrative
+TXN-003-001,02/01/2026,CUST003,in,5200.00,GBP,5200.00,GB,20-00-00,60-00-03,cash,Cash deposit customer A
+TXN-003-002,02/01/2026,CUST003,out,4800.00,GBP,4800.00,PK,,60-00-03,wire,Remittance to Pakistan
+TXN-003-003,03/01/2026,CUST003,in,9500.00,GBP,9500.00,GB,,60-00-03,cash,Cash deposit customer B
+TXN-003-004,03/01/2026,CUST003,out,9200.00,GBP,9200.00,BD,,60-00-03,wire,Transfer to Bangladesh
+TXN-003-005,04/01/2026,CUST003,in,7800.00,GBP,7800.00,GB,,60-00-03,cash,Cash deposit customer C
+TXN-003-006,04/01/2026,CUST003,out,7500.00,GBP,7500.00,IN,,60-00-03,wire,India family remittance
+TXN-003-007,05/01/2026,CUST003,in,9900.00,GBP,9900.00,GB,,60-00-03,cash,Cash deposit urgent
+TXN-003-008,05/01/2026,CUST003,out,9850.00,GBP,9850.00,NG,,60-00-03,wire,Nigeria business payment
+TXN-003-009,06/01/2026,CUST003,in,9750.00,GBP,9750.00,GB,,60-00-03,cash,Cash deposit walk-in
+TXN-003-010,06/01/2026,CUST003,out,9600.00,GBP,9600.00,PK,,60-00-03,wire,Pakistan urgent transfer
+TXN-003-011,07/01/2026,CUST003,in,8900.00,GBP,8900.00,GB,,60-00-03,cash,Counter deposit
+TXN-003-012,07/01/2026,CUST003,out,8700.00,GBP,8700.00,AE,,60-00-03,wire,Dubai exchange partner
+TXN-003-013,08/01/2026,CUST003,in,9950.00,GBP,9950.00,GB,,60-00-03,cash,Cash deposit regular
+TXN-003-014,08/01/2026,CUST003,out,9900.00,GBP,9900.00,SO,,60-00-03,wire,Somalia humanitarian
+TXN-003-015,09/01/2026,CUST003,in,9800.00,GBP,9800.00,GB,,60-00-03,cash,Morning deposit batch
+TXN-003-016,09/01/2026,CUST003,out,9700.00,GBP,9700.00,AF,,60-00-03,wire,Afghanistan family support
+TXN-003-017,10/01/2026,CUST003,in,6500.00,GBP,6500.00,GB,,60-00-03,cash,Cash from agent
+TXN-003-018,10/01/2026,CUST003,out,6200.00,GBP,6200.00,SY,,60-00-03,wire,Syria relief transfer
+TXN-003-019,11/01/2026,CUST003,in,12000.00,GBP,12000.00,GB,40-00-00,60-00-03,wire,Bank transfer from client
+TXN-003-020,11/01/2026,CUST003,out,11500.00,GBP,11500.00,YE,,60-00-03,wire,Yemen urgent payment

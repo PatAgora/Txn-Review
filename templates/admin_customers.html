@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block page_title %}Customer Management{% endblock %}
+{% block content %}
+<p class="text-muted">Upload customer population or add individual customers. Reviewers can only upload statements for customers listed here.</p>
+
+<!-- Upload Customer Population -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Upload Customer Population</h5>
+    <form method="post" enctype="multipart/form-data" class="d-flex gap-2 align-items-end">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="upload">
+      <div class="flex-grow-1">
+        <label class="form-label">Customer CSV File</label>
+        <input type="file" name="customer_file" accept=".csv" class="form-control">
+      </div>
+      <button class="btn btn-primary">Upload</button>
+    </form>
+    <div class="form-text mt-2">
+      CSV columns: <code>customer_id</code> (required), <code>customer_name</code>, <code>business_type</code>, <code>onboarded_date</code>, <code>status</code>
+    </div>
+  </div>
+</div>
+
+<!-- Add Single Customer -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Add / Edit Customer</h5>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="add">
+      <div class="row g-3">
+        <div class="col-md-2">
+          <label class="form-label">Customer ID *</label>
+          <input type="text" name="customer_id" class="form-control" required placeholder="CUST001">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Customer Name</label>
+          <input type="text" name="customer_name" class="form-control" placeholder="ABC Trading Ltd">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Business Type</label>
+          <input type="text" name="business_type" class="form-control" placeholder="Retail">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Onboarded Date</label>
+          <input type="date" name="onboarded_date" class="form-control">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Status</label>
+          <select name="status" class="form-select">
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+            <option value="suspended">Suspended</option>
+          </select>
+        </div>
+        <div class="col-md-1 d-flex align-items-end">
+          <button class="btn btn-success">Add</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Customer List -->
+<div class="card">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Customer Population ({{ customers|length }})</h5>
+    
+    {% if customers %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle">
+        <thead>
+          <tr>
+            <th>Customer ID</th>
+            <th>Name</th>
+            <th>Business Type</th>
+            <th>Onboarded</th>
+            <th>Status</th>
+            <th>Transactions</th>
+            <th>Statements</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in customers %}
+          <tr>
+            <td><strong>{{ c.customer_id }}</strong></td>
+            <td>{{ c.customer_name or '—' }}</td>
+            <td>{{ c.business_type or '—' }}</td>
+            <td>{{ c.onboarded_date or '—' }}</td>
+            <td>
+              {% if c.status == 'active' %}
+                <span class="badge bg-success">Active</span>
+              {% elif c.status == 'inactive' %}
+                <span class="badge bg-secondary">Inactive</span>
+              {% else %}
+                <span class="badge bg-warning">{{ c.status }}</span>
+              {% endif %}
+            </td>
+            <td>{{ c.txn_count or 0 }}</td>
+            <td>{{ c.statement_count or 0 }}</td>
+            <td>
+              <form method="post" class="d-inline" onsubmit="return confirm('Delete customer {{ c.customer_id }}?');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="customer_id" value="{{ c.customer_id }}">
+                <button class="btn btn-sm btn-outline-danger">Delete</button>
+              </form>
+              <a href="{{ url_for('upload', customer_id=c.customer_id) }}" class="btn btn-sm btn-outline-primary">Upload</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-muted text-center py-4">
+      <p>No customers yet. Upload a customer population CSV or add customers manually.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Sample CSV Format -->
+<div class="card mt-4">
+  <div class="card-body">
+    <h6 class="card-title">Sample Customer CSV Format</h6>
+    <pre class="bg-light p-3 rounded"><code>customer_id,customer_name,business_type,onboarded_date,status
+CUST001,ABC Trading Ltd,Retail,2024-01-15,active
+CUST002,XYZ Services Inc,Consulting,2024-02-20,active
+CUST003,Smith & Sons,Construction,2023-11-01,active</code></pre>
+  </div>
+</div>
+
+{% endblock %}

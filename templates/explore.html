@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block page_title %}Explore Transactions{% endblock %}
+{% block content %}
+
+<form method="get" class="row g-2 align-items-end mb-3">
+  <div class="col-auto">
+    <label class="form-label">Customer ID</label>
+    <input class="form-control" type="text" name="customer_id" value="{{ request.args.get('customer_id','') }}">
+  </div>
+  <div class="col-auto">
+    <label class="form-label">Direction</label>
+    <select class="form-select" name="direction">
+      <option value="">Any</option>
+      <option value="in"  {{ 'selected' if request.args.get('direction')=='in' else '' }}>In</option>
+      <option value="out" {{ 'selected' if request.args.get('direction')=='out' else '' }}>Out</option>
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label">Channel</label>
+    <select class="form-select" name="channel">
+      <option value="">Any</option>
+      {% for ch in channels %}
+      <option value="{{ ch }}" {{ 'selected' if request.args.get('channel')==ch else '' }}>{{ ch }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label">Risk</label>
+    <select class="form-select" name="risk">
+      <option value="">Any</option>
+      <option value="HIGH" {{ 'selected' if request.args.get('risk')=='HIGH' else '' }}>High</option>
+      <option value="HIGH_3RD" {{ 'selected' if request.args.get('risk')=='HIGH_3RD' else '' }}>High 3rd</option>
+      <option value="PROHIBITED" {{ 'selected' if request.args.get('risk')=='PROHIBITED' else '' }}>Prohibited</option>
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label">From</label>
+    <input type="date" class="form-control" name="date_from" value="{{ request.args.get('date_from','') }}">
+  </div>
+  <div class="col-auto">
+    <label class="form-label">To</label>
+    <input type="date" class="form-control" name="date_to" value="{{ request.args.get('date_to','') }}">
+  </div>
+  <div class="col-auto">
+    <button class="btn btn-primary">Apply</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('explore') }}">Clear</a>
+    <a class="btn btn-outline-success" href="{{ request.full_path ~ ('&' if '?' in request.full_path and not request.full_path.endswith('?') else '?') }}export=csv">Export CSV</a>
+  </div>
+</form>
+
+<div class="table-responsive">
+  <table class="table table-striped table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Date</th><th>ID</th><th>Customer</th><th>Dir</th>
+        <th class="text-end">Amount</th><th>Cur</th><th>Country</th><th>Channel</th>
+        <th>Payer SC</th><th>Payee SC</th><th>Narrative</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.txn_date }}</td>
+        <td class="text-monospace">{{ r.id }}</td>
+        <td>{{ r.customer_id }}</td>
+        <td>{{ r.direction }}</td>
+        <td class="text-end">£{{ '%.2f'|format(r.base_amount or 0) }}</td>
+        <td>{{ r.currency }}</td>
+        <td>{{ r.country_iso2 or '-' }}</td>
+        <td>{{ r.channel or '-' }}</td>
+        <td class="text-monospace">{{ r.payer_sort_code or '-' }}</td>
+        <td class="text-monospace">{{ r.payee_sort_code or '-' }}</td>
+        <td class="u-ellipsis-280">{{ r.narrative }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="11" class="text-muted">No results.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

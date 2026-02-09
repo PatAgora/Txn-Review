@@ -1,0 +1,3 @@
+.kpi { border-left: 6px solid #ff6b35; }
+.kpi .kpi-label { font-size: .8rem; color:#6c757d; text-transform: uppercase; letter-spacing:.06em;}
+.kpi .kpi-value { font-size: 1.6rem; font-weight: 700; }

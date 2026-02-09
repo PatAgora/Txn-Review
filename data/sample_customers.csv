@@ -1,0 +1,11 @@
+customer_id,customer_name,business_type,onboarded_date,status
+CUST001,Acme Trading Ltd,Import/Export,2023-01-15,active
+CUST002,Global Logistics Inc,Freight Forwarding,2022-06-20,active
+CUST003,Swift Payments Co,Money Services Business,2023-03-01,active
+CUST004,Northern Retail Group,Retail,2021-11-10,active
+CUST005,Tech Solutions Ltd,IT Services,2024-01-05,active
+CUST006,Sunrise Hospitality,Hotel & Restaurant,2022-09-15,active
+CUST007,Metro Construction,Construction,2023-07-22,active
+CUST008,Eastern Imports Ltd,Wholesale Trade,2022-04-18,active
+CUST009,Citywide Transport,Transportation,2023-05-30,active
+CUST010,Premier Real Estate,Property Management,2021-08-12,active

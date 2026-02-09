@@ -1,0 +1,5 @@
+sort_code,bank_name,branch,schemes,valid_from,valid_to
+12-34-56,Barclays,Liverpool,"BACS,FPS,CHAPS",,
+20-00-00,Barclays,London,"BACS,FPS,CHAPS",,
+04-00-04,Monzo,London,"FPS",,
+23-69-72,Starling Bank,London,"FPS,CHAPS",,

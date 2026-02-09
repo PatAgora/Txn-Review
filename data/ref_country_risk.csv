@@ -1,0 +1,7 @@
+iso2,risk_level,score,prohibited
+GB,LOW,0,0
+IE,LOW,0,0
+AE,HIGH_3RD,35,0
+TR,HIGH,25,0
+RU,PROHIBITED,100,1
+IR,PROHIBITED,100,1

@@ -1,0 +1,3 @@
+customer_id,expected_monthly_in,expected_monthly_out
+CUST001,8000,5000
+CUST002,12000,9000

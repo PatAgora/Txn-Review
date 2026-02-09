@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scrutinise</title>
+    <link href="/static/vendor/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/vendor/css/bootstrap-icons.min.css" rel="stylesheet">
+    
+    <link href="/static/css/login.css" rel="stylesheet">
+  </head>
+  <body>
+    <div class="auth-shell">
+      <div class="auth-card">
+        <!-- Left: branding -->
+        <div class="auth-left">
+          <div class="logo-wrapper">
+            <img src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 66 66'><g fill='none' stroke='%23ff6a00' stroke-width='5'><circle cx='28' cy='28' r='18'/><line x1='41' y1='41' x2='62' y2='62' stroke-linecap='round'/></g></svg>"
+                 alt="Scrutinise Logo">
+          </div>
+          <div class="brand-logo">
+            <img src="{{ url_for('static', filename='scrutinise-txn-logo.png') }}" alt="Scrutinise TXN" class="brand-logo-img">
+          </div>
+          <div class="tagline">Transaction Analysis System</div>
+          <div class="feature"><i class="bi bi-speedometer2"></i><span>Configurable risk scoring with rules catalogue</span></div>
+          <div class="feature"><i class="bi bi-journal-check"></i><span>Regulatory Standard Audit Trails</span></div>
+          <div class="feature"><i class="bi bi-diagram-3"></i><span>AI-Powered Customer Outreach & Rationale Generator</span></div>
+        </div>
+
+        <!-- Right: form -->
+        <div class="auth-right">
+          <div class="login-box">
+            <div class="brand-mark">
+              <span class="mark-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7"></circle>
+                  <line x1="16.5" y1="16.5" x2="22" y2="22" stroke-linecap="round"></line>
+                </svg>
+              </span>
+              <span>Scrutinise</span>
+            </div>
+            <h3>Welcome</h3>
+            <div class="subcopy">Sign in to access the Transaction Analysis system</div>
+
+            {% with messages = get_flashed_messages() %}
+              {% if messages %}
+                <div class="alert alert-warning">{{ messages[0] }}</div>
+              {% endif %}
+            {% endwith %}
+
+            <form method="POST">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <div class="mb-3">
+                <label for="username" class="form-label">Username</label>
+                <input type="text" class="form-control" id="username" name="username" required autofocus>
+              </div>
+              <div class="mb-3">
+                <label for="password" class="form-label">Password</label>
+                <input type="password" class="form-control" id="password" name="password" required>
+                <div class="forgot-password">
+                  <a href="#">Forgot your password?</a>
+                </div>
+              </div>
+              <div class="d-grid">
+                <button type="submit" class="btn btn-login">Sign In</button>
+              </div>
+            </form>
+
+            <div class="legal">
+              <hr>
+              <div>&copy; 2026 Agora Consulting Solutions</div>
+              <div class="badges">
+                <div class="badge-item"><i class="bi bi-award-fill"></i> ISO 27001 Certified</div>
+                <div class="badge-item"><i class="bi bi-shield-lock-fill"></i> Enterprise Security</div>
+                <div class="badge-item"><i class="bi bi-globe2"></i> Global Compliance</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <script src="/static/vendor/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

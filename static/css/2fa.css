@@ -1,0 +1,67 @@
+/* ==========================================================
+   Scrutinise TXN – 2FA Verification Styles
+   Extracted from verify_2fa.html for CSP compliance
+   ========================================================== */
+
+body {
+  min-height: 100vh;
+  display: flex;
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+}
+.auth-container {
+  display: flex;
+  width: 100%;
+  min-height: 100vh;
+}
+.brand-panel {
+  flex: 1;
+  background: #202429;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 3rem;
+  color: white;
+}
+.brand-panel img {
+  max-width: 320px;
+  margin-bottom: 2rem;
+}
+.form-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 3rem;
+  background: white;
+}
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+}
+.code-input {
+  font-size: 1.5rem;
+  letter-spacing: 0.5rem;
+  text-align: center;
+  font-family: monospace;
+}
+.shield-icon {
+  font-size: 4rem;
+  color: #ff6b35;
+  margin-bottom: 1rem;
+}
+@media (max-width: 768px) {
+  .brand-panel { display: none; }
+}
+
+/* --- 2FA Setup utilities (setup_2fa.html inline replacements) --- */
+.u-maxw-200 { max-width: 200px; }
+.u-break-all { word-break: break-all; }
+.u-code-input { letter-spacing: 0.5rem; font-family: monospace; }
+
+/* --- 2FA Backup codes print styles --- */
+@media print {
+  .btn, .alert-info { display: none !important; }
+  .card-footer { display: none !important; }
+}

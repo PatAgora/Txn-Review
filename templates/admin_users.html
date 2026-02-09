@@ -1,0 +1,301 @@
+{% extends "base.html" %}
+{% block page_title %}User Management{% endblock %}
+{% block content %}
+<p class="text-muted">Create and manage user accounts with CREST-compliant security controls.</p>
+
+<!-- Quick Links -->
+<div class="mb-3 d-flex align-items-center gap-2 flex-wrap">
+  <a href="{{ url_for('admin_smtp') }}" class="btn btn-outline-primary btn-sm">
+    📧 Email Settings {% if not smtp_configured %}<span class="badge bg-warning text-dark">Not Configured</span>{% endif %}
+  </a>
+  <a href="{{ url_for('admin_audit_log') }}" class="btn btn-outline-secondary btn-sm">
+    📋 Audit Log
+  </a>
+  
+  <div class="vr mx-2"></div>
+  
+  <!-- 2FA Enforcement Toggle -->
+  <form method="post" class="d-inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="action" value="toggle_2fa_enforcement">
+    {% if enforce_2fa %}
+      <button type="submit" class="btn btn-success btn-sm" onclick="return confirm('Disable mandatory 2FA? Users will no longer be required to set up two-factor authentication.');">
+        🛡️ 2FA Enforced <span class="badge bg-light text-success">ON</span>
+      </button>
+    {% else %}
+      <button type="submit" class="btn btn-outline-warning btn-sm" onclick="return confirm('Enable mandatory 2FA? All users will be required to set up two-factor authentication before accessing the system.');">
+        🛡️ Enforce 2FA <span class="badge bg-light text-muted">OFF</span>
+      </button>
+    {% endif %}
+  </form>
+</div>
+
+<!-- Add New User -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Add New User</h5>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="add">
+      <div class="row g-3">
+        <div class="col-md-3">
+          <label class="form-label">Username *</label>
+          <input type="text" name="username" class="form-control" required placeholder="johndoe">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Email (for notifications)</label>
+          <input type="email" name="email" class="form-control" placeholder="john@company.com">
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">Role *</label>
+          <select name="role" class="form-select">
+            <option value="reviewer">Reviewer</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label">&nbsp;</label>
+          <div class="form-check mt-2">
+            <input type="checkbox" class="form-check-input" name="send_email" id="send_email" 
+                   {% if smtp_configured %}checked{% else %}disabled{% endif %}>
+            <label class="form-check-label" for="send_email">Send welcome email</label>
+          </div>
+        </div>
+        <div class="col-md-2 d-flex align-items-end">
+          <button class="btn btn-success">Create User</button>
+        </div>
+      </div>
+      <div class="form-text mt-2">
+        A temporary password will be generated. User must change it on first login.
+        {% if not smtp_configured %}
+        <span class="text-warning">⚠️ Email not configured - <a href="{{ url_for('admin_smtp') }}">configure SMTP</a> to send welcome emails.</span>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- User List -->
+<div class="card">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Users ({{ users|length }})</h5>
+    
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Username</th>
+            <th>Email</th>
+            <th>Role</th>
+            <th>2FA</th>
+            <th>Status</th>
+            <th>Last Login</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td>
+              <strong>{{ u.username }}</strong>
+              {% if u.id == current_user.id %}
+                <span class="badge bg-info">You</span>
+              {% endif %}
+            </td>
+            <td class="text-muted small">{{ u.email or '—' }}</td>
+            <td>
+              {% if u.role == 'admin' %}
+                <span class="badge bg-danger">Admin</span>
+              {% else %}
+                <span class="badge bg-secondary">Reviewer</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if u.totp_enabled and u.totp_verified %}
+                <span class="badge bg-success" title="2FA Enabled">🛡️</span>
+              {% else %}
+                <span class="badge bg-light text-muted" title="2FA Not Enabled">—</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if u.locked_until %}
+                <span class="badge bg-danger">🔒 Locked</span>
+              {% elif u.must_change_password %}
+                <span class="badge bg-warning text-dark">⚠️ Password Reset Required</span>
+              {% else %}
+                <span class="badge bg-success">Active</span>
+              {% endif %}
+              {% if u.failed_login_attempts and u.failed_login_attempts > 0 %}
+                <small class="text-danger">({{ u.failed_login_attempts }} failed attempts)</small>
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ u.last_login[:16] if u.last_login else 'Never' }}</td>
+            <td>
+              <div class="btn-group btn-group-sm">
+                <!-- Edit Button (opens modal) -->
+                <button type="button" class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#editModal{{ u.id }}">
+                  Edit
+                </button>
+                
+                <!-- Unlock Button (if locked) -->
+                {% if u.locked_until %}
+                <form method="post" class="d-inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="unlock">
+                  <input type="hidden" name="user_id" value="{{ u.id }}">
+                  <button type="submit" class="btn btn-outline-warning">Unlock</button>
+                </form>
+                {% endif %}
+                
+                <!-- Delete Button -->
+                {% if u.id != current_user.id %}
+                <form method="post" class="d-inline" onsubmit="return confirm('Delete user {{ u.username }}? This cannot be undone.');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="delete">
+                  <input type="hidden" name="user_id" value="{{ u.id }}">
+                  <button type="submit" class="btn btn-outline-danger">Delete</button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+          
+          <!-- Edit Modal for each user -->
+          <div class="modal fade" id="editModal{{ u.id }}" tabindex="-1">
+            <div class="modal-dialog">
+              <div class="modal-content">
+                <form method="post">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <input type="hidden" name="action" value="update">
+                  <input type="hidden" name="user_id" value="{{ u.id }}">
+                  
+                  <div class="modal-header">
+                    <h5 class="modal-title">Edit User: {{ u.username }}</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                  </div>
+                  
+                  <div class="modal-body">
+                    <div class="mb-3">
+                      <label class="form-label">Email</label>
+                      <input type="email" name="email" class="form-control" value="{{ u.email or '' }}" placeholder="user@company.com">
+                    </div>
+                    
+                    <div class="mb-3">
+                      <label class="form-label">Role</label>
+                      <select name="role" class="form-select">
+                        <option value="reviewer" {% if u.role == 'reviewer' %}selected{% endif %}>Reviewer</option>
+                        <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>Admin</option>
+                      </select>
+                    </div>
+                    
+                    <hr>
+                    
+                    <div class="mb-3">
+                      <label class="form-label">Reset Password</label>
+                      <input type="password" name="new_password" class="form-control" placeholder="Leave blank to keep current password">
+                      <div class="form-text">Min 10 chars, uppercase, lowercase, number, special char required.</div>
+                    </div>
+                    
+                    <div class="form-check">
+                      <input type="checkbox" class="form-check-input" name="force_password_change" id="force_pwd_{{ u.id }}">
+                      <label class="form-check-label" for="force_pwd_{{ u.id }}">Force password change on next login</label>
+                    </div>
+                    
+                    {% if u.totp_enabled and u.totp_verified %}
+                    <hr>
+                    <div class="form-check">
+                      <input type="checkbox" class="form-check-input" name="reset_2fa" id="reset_2fa_{{ u.id }}">
+                      <label class="form-check-label text-danger" for="reset_2fa_{{ u.id }}">
+                        Reset 2FA (user will need to set up again)
+                      </label>
+                    </div>
+                    {% endif %}
+                  </div>
+                  
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Security Features Card -->
+<div class="card mt-4 bg-light">
+  <div class="card-body">
+    <h6 class="card-title">🛡️ CREST Security Features</h6>
+    <div class="row small">
+      <div class="col-md-3">
+        <strong>Password Policy</strong>
+        <ul class="text-muted mb-0">
+          <li>Minimum 10 characters</li>
+          <li>Uppercase + lowercase required</li>
+          <li>Number + special char required</li>
+          <li>Common passwords blocked</li>
+        </ul>
+      </div>
+      <div class="col-md-3">
+        <strong>Two-Factor Auth (2FA)</strong>
+        <ul class="text-muted mb-0">
+          <li>TOTP-based (Google Auth, etc.)</li>
+          <li>Backup codes for recovery</li>
+          <li>Admin can reset user 2FA</li>
+          <li>All 2FA events logged</li>
+        </ul>
+      </div>
+      <div class="col-md-3">
+        <strong>Account Lockout</strong>
+        <ul class="text-muted mb-0">
+          <li>5 failed attempts = lockout</li>
+          <li>15 minute lockout duration</li>
+          <li>Admins can manually unlock</li>
+          <li>All attempts logged</li>
+        </ul>
+      </div>
+      <div class="col-md-3">
+        <strong>Session Security</strong>
+        <ul class="text-muted mb-0">
+          <li>30 minute inactivity timeout</li>
+          <li>Secure session cookies</li>
+          <li>Login/logout auditing</li>
+          <li>Force password change support</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Role Permissions -->
+<div class="card mt-4">
+  <div class="card-body">
+    <h6 class="card-title">Role Permissions</h6>
+    <div class="row">
+      <div class="col-md-6">
+        <strong>Reviewer</strong>
+        <ul class="text-muted small">
+          <li>View Dashboard, Alerts, Explore</li>
+          <li>Use AI Outreach and AI Rationale</li>
+          <li>Upload statements for customers</li>
+        </ul>
+      </div>
+      <div class="col-md-6">
+        <strong>Admin</strong>
+        <ul class="text-muted small">
+          <li>All Reviewer permissions</li>
+          <li>Manage customer population</li>
+          <li>Manage users and security settings</li>
+          <li>Configure rules, SMTP, view audit logs</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

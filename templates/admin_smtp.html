@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block page_title %}Email Settings (SMTP){% endblock %}
+{% block content %}
+<p class="text-muted">Configure SMTP settings to enable email notifications for new user accounts.</p>
+
+<div class="row">
+  <div class="col-lg-8">
+    <div class="card mb-4">
+      <div class="card-body">
+        <h5 class="card-title mb-3">SMTP Configuration</h5>
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="action" value="save">
+          
+          <div class="row mb-3">
+            <div class="col-md-8">
+              <label class="form-label">SMTP Host</label>
+              <input type="text" name="smtp_host" class="form-control" 
+                     value="{{ smtp.host }}" placeholder="smtp.gmail.com or smtp.sendgrid.net">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Port</label>
+              <input type="number" name="smtp_port" class="form-control" 
+                     value="{{ smtp.port }}" placeholder="587">
+            </div>
+          </div>
+          
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <label class="form-label">Username</label>
+              <input type="text" name="smtp_username" class="form-control" 
+                     value="{{ smtp.username }}" placeholder="apikey or email@example.com">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Password / API Key 🔐</label>
+              <input type="password" name="smtp_password" class="form-control" 
+                     placeholder="{% if smtp.password_set %}••••••••• (encrypted, leave blank to keep){% else %}Enter password or API key{% endif %}">
+              {% if smtp.password_set %}
+              <div class="form-text text-success">✓ Password is set and encrypted at rest</div>
+              {% endif %}
+            </div>
+          </div>
+          
+          <div class="row mb-3">
+            <div class="col-md-6">
+              <label class="form-label">From Email Address</label>
+              <input type="email" name="smtp_from_email" class="form-control" 
+                     value="{{ smtp.from_email }}" placeholder="noreply@yourcompany.com">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">From Name</label>
+              <input type="text" name="smtp_from_name" class="form-control" 
+                     value="{{ smtp.from_name }}" placeholder="Transaction Review Tool">
+            </div>
+          </div>
+          
+          <div class="mb-3">
+            <div class="form-check">
+              <input type="checkbox" class="form-check-input" name="smtp_use_tls" id="smtp_use_tls" 
+                     {% if smtp.use_tls %}checked{% endif %}>
+              <label class="form-check-label" for="smtp_use_tls">Use TLS (recommended for port 587)</label>
+            </div>
+          </div>
+          
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+        </form>
+      </div>
+    </div>
+    
+    <!-- Test Email -->
+    <div class="card mb-4">
+      <div class="card-body">
+        <h5 class="card-title mb-3">Test Email Configuration</h5>
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="action" value="test">
+          <div class="input-group">
+            <input type="email" name="test_email" class="form-control" placeholder="Enter email address to send test">
+            <button type="submit" class="btn btn-outline-secondary">Send Test Email</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  
+  <div class="col-lg-4">
+    <!-- Help Card -->
+    <div class="card bg-light">
+      <div class="card-body">
+        <h6 class="card-title">📖 Common SMTP Providers</h6>
+        <hr>
+        
+        <p><strong>Gmail</strong></p>
+        <ul class="small mb-3">
+          <li>Host: smtp.gmail.com</li>
+          <li>Port: 587</li>
+          <li>Use TLS: Yes</li>
+          <li>Username: your@gmail.com</li>
+          <li>Password: App Password (not regular password)</li>
+        </ul>
+        
+        <p><strong>SendGrid</strong></p>
+        <ul class="small mb-3">
+          <li>Host: smtp.sendgrid.net</li>
+          <li>Port: 587</li>
+          <li>Use TLS: Yes</li>
+          <li>Username: apikey</li>
+          <li>Password: Your API Key</li>
+        </ul>
+        
+        <p><strong>AWS SES</strong></p>
+        <ul class="small mb-3">
+          <li>Host: email-smtp.us-east-1.amazonaws.com</li>
+          <li>Port: 587</li>
+          <li>Use TLS: Yes</li>
+          <li>Username: SMTP Username</li>
+          <li>Password: SMTP Password</li>
+        </ul>
+        
+        <p><strong>Microsoft 365</strong></p>
+        <ul class="small mb-0">
+          <li>Host: smtp.office365.com</li>
+          <li>Port: 587</li>
+          <li>Use TLS: Yes</li>
+          <li>Username: your@company.com</li>
+          <li>Password: Account password</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mt-3">
+  <a href="{{ url_for('admin_users') }}" class="btn btn-outline-secondary">← Back to User Management</a>
+</div>
+{% endblock %}

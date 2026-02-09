@@ -1,0 +1,16 @@
+id,txn_date,customer_id,direction,amount,currency,base_amount,country_iso2,payer_sort_code,payee_sort_code,channel,narrative
+TXN-001-001,15/01/2026,CUST001,in,25000.00,GBP,25000.00,GB,20-00-00,40-00-01,wire,Invoice payment from UK supplier
+TXN-001-002,16/01/2026,CUST001,out,12500.00,GBP,12500.00,DE,,40-00-01,wire,Payment to German manufacturer
+TXN-001-003,17/01/2026,CUST001,in,8500.00,GBP,8500.00,GB,30-00-15,40-00-01,wire,Customer deposit
+TXN-001-004,18/01/2026,CUST001,out,3200.00,GBP,3200.00,GB,40-00-01,20-45-67,wire,Office rent January
+TXN-001-005,20/01/2026,CUST001,in,45000.00,GBP,45000.00,CN,,40-00-01,wire,Payment from China partner
+TXN-001-006,21/01/2026,CUST001,out,9800.00,GBP,9800.00,GB,40-00-01,,cash,Cash withdrawal for expenses
+TXN-001-007,22/01/2026,CUST001,in,15750.00,GBP,15750.00,US,,40-00-01,wire,USD invoice converted
+TXN-001-008,23/01/2026,CUST001,out,22000.00,GBP,22000.00,HK,,40-00-01,wire,Supplier payment Hong Kong
+TXN-001-009,24/01/2026,CUST001,in,6200.00,GBP,6200.00,GB,40-25-30,40-00-01,wire,Refund from vendor
+TXN-001-010,25/01/2026,CUST001,out,4500.00,GBP,4500.00,GB,40-00-01,60-12-34,wire,Payroll processing
+TXN-001-011,27/01/2026,CUST001,in,38000.00,GBP,38000.00,AE,,40-00-01,wire,Payment from Dubai client
+TXN-001-012,28/01/2026,CUST001,out,7800.00,GBP,7800.00,GB,40-00-01,,cash,Petty cash replenishment
+TXN-001-013,29/01/2026,CUST001,in,12300.00,GBP,12300.00,FR,,40-00-01,wire,French subsidiary transfer
+TXN-001-014,30/01/2026,CUST001,out,55000.00,GBP,55000.00,RU,,40-00-01,wire,Equipment purchase Russia
+TXN-001-015,31/01/2026,CUST001,in,9100.00,GBP,9100.00,GB,40-00-01,40-00-01,wire,Internal transfer

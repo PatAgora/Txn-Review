@@ -1,0 +1,66 @@
+/* ==========================================================
+   Scrutinise TXN – Main Application Styles
+   Extracted from inline <style> blocks for CSP compliance
+   ========================================================== */
+
+/* --- Layout: sidebar + content --- */
+body { overflow-x: hidden; }
+.sidebar {
+  height: 100vh; position: fixed; top: 0; left: 0; width: 240px;
+  background-color: #212529; color: #fff; padding: 0.75rem 0.75rem 1rem;
+  display: flex; flex-direction: column;
+}
+.brand { padding: 8px 0; }
+.brand img { max-width: 180px; height: auto; }
+.sidebar .nav-link { color: #cfd3da; padding: .45rem .75rem; border-radius: .5rem; }
+.sidebar .nav-link.active, .sidebar .nav-link:hover { color: #fff; background: #2f3640; }
+.sidebar .accordion-button { background: transparent; color: #e9ecef; padding: .5rem .75rem; }
+.sidebar .accordion-button:not(.collapsed) { background: #2f3640; color: #fff; }
+.sidebar .accordion-body { padding: .5rem .25rem .75rem 0.5rem; }
+.content { margin-left: 240px; padding: 1rem; }
+
+/* --- KPI cards --- */
+.kpi { border-left: 6px solid #ff6b35; }
+.kpi .kpi-label { font-size: .8rem; color: #6c757d; text-transform: uppercase; letter-spacing: .06em; }
+.kpi .kpi-value { font-size: 1.6rem; font-weight: 700; }
+
+/* --- Top bar --- */
+.topbar { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }
+.topbar .spacer { flex: 1; }
+.topbar .page-title { font-size: 1.4rem; font-weight: 600; color: #1a202c; margin: 0; white-space: nowrap; }
+
+/* --- User info in sidebar --- */
+.user-info {
+  margin-top: auto;
+  padding: 0.75rem;
+  border-top: 1px solid #3a3f47;
+  font-size: 0.85rem;
+}
+.user-info .username { font-weight: 600; }
+.user-info .role-badge {
+  font-size: 0.7rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.25rem;
+}
+
+/* --- Utility classes (replacing inline style= attributes) --- */
+.u-nowrap { white-space: nowrap; }
+.u-prewrap { white-space: pre-wrap; }
+.u-ellipsis-280 { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-maxw-260 { max-width: 260px; }
+.u-w-80 { width: 80px; }
+.u-w-90 { width: 90px; }
+.u-w-120 { width: 120px; }
+.u-w-150 { width: 150px; }
+.u-w-160 { width: 160px; }
+.u-h-260 { height: 260px; }
+.u-h-300 { height: 300px; }
+.u-h-320 { height: 320px; }
+.u-kpi-red { border-left-color: #dc3545 !important; }
+.u-kpi-amber { border-left-color: #ffc107 !important; }
+.u-print-comments { display: none; padding: 12px; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; min-height: 100px; }
+
+/* --- 2FA utility classes --- */
+.u-maxw-200 { max-width: 200px; }
+.u-break-all { word-break: break-all; }
+.u-code-input { letter-spacing: 0.5rem; font-family: monospace; }

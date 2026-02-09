@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block page_title %}Backup Codes{% endblock %}
+{% block content %}
+
+<div class="row justify-content-center">
+  <div class="col-lg-6">
+    <div class="card">
+      <div class="card-header {% if show_success %}bg-success{% else %}bg-warning{% endif %} text-white">
+        <h5 class="mb-0">
+          {% if show_success %}
+            ✅ Two-Factor Authentication Enabled!
+          {% elif regenerated %}
+            🔄 Backup Codes Regenerated
+          {% else %}
+            🔑 Your Backup Codes
+          {% endif %}
+        </h5>
+      </div>
+      <div class="card-body">
+        
+        <div class="alert alert-warning">
+          <strong>⚠️ Important:</strong> Save these backup codes in a secure place. 
+          Each code can only be used once. If you lose access to your authenticator app, 
+          you can use these codes to log in.
+        </div>
+        
+        <div class="card bg-light mb-3">
+          <div class="card-body">
+            <div class="row">
+              {% for code in backup_codes %}
+              <div class="col-6 mb-2">
+                <code class="fs-5 user-select-all">{{ code[:4] }}-{{ code[4:] }}</code>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        
+        <div class="d-flex gap-2 mb-3">
+          <button class="btn btn-outline-primary flex-fill" onclick="copyBackupCodes()">
+            📋 Copy Codes
+          </button>
+          <button class="btn btn-outline-secondary flex-fill" onclick="downloadBackupCodes()">
+            💾 Download
+          </button>
+          <button class="btn btn-outline-secondary flex-fill" onclick="window.print()">
+            🖨️ Print
+          </button>
+        </div>
+        
+        <div class="alert alert-info small mb-0">
+          <strong>Tips for storing backup codes:</strong>
+          <ul class="mb-0 mt-1">
+            <li>Save them in a password manager</li>
+            <li>Print and store in a secure location</li>
+            <li>Don't store them on the same device as your authenticator app</li>
+          </ul>
+        </div>
+        
+      </div>
+      <div class="card-footer">
+        <a href="{{ url_for('manage_2fa') }}" class="btn btn-primary">
+          Continue to Security Settings
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const backupCodes = {{ backup_codes | tojson }};
+
+function copyBackupCodes() {
+  const text = backupCodes.map(c => c.slice(0,4) + '-' + c.slice(4)).join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    alert('Backup codes copied to clipboard!');
+  });
+}
+
+function downloadBackupCodes() {
+  const text = 'Scrutinise TXN - Backup Codes\n' +
+               'Generated: ' + new Date().toISOString() + '\n' +
+               '================================\n\n' +
+               backupCodes.map(c => c.slice(0,4) + '-' + c.slice(4)).join('\n') +
+               '\n\n================================\n' +
+               'Keep these codes safe. Each code can only be used once.';
+  
+  const blob = new Blob([text], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'scrutinise-backup-codes.txt';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+
+<link href="/static/css/2fa.css" rel="stylesheet">
+
+{% endblock %}
