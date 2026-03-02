@@ -4,12 +4,10 @@
 
 {% if overview_mode %}
 <!-- ==================== NO CUSTOMER SELECTED ==================== -->
-<div class="d-flex justify-content-center align-items-center" style="min-height: 60vh;">
-  <div class="text-center">
-    <i class="bi bi-search" style="font-size: 3rem; color: #9E9EB8;"></i>
-    <h4 class="text-muted mt-3">No Customer Selected</h4>
-    <p class="text-muted">Use the search bar above to enter a Customer ID and view their transaction dashboard.</p>
-  </div>
+<div class="empty-state">
+  <div class="empty-icon"><i class="bi bi-search"></i></div>
+  <h4>No Customer Selected</h4>
+  <p>Use the search bar above to enter a Customer ID and view their transaction dashboard.</p>
 </div>
 
 {% elif filter_meta and filter_meta.customer_id %}
@@ -192,34 +190,34 @@
           labels: tLabels,
           datasets: [
             { 
-              label: 'Money In', 
-              data: tIn, 
-              backgroundColor: 'rgba(25, 135, 84, 0.7)',
-              borderColor: 'rgb(25, 135, 84)',
+              label: 'Money In',
+              data: tIn,
+              backgroundColor: 'rgba(16, 185, 129, 0.7)',
+              borderColor: 'rgb(16, 185, 129)',
               borderWidth: 1,
               stack: 'in'
             },
             { 
-              label: 'Cash Deposits', 
-              data: tCashIn, 
-              backgroundColor: 'rgba(13, 202, 240, 0.7)',
-              borderColor: 'rgb(13, 202, 240)',
+              label: 'Cash Deposits',
+              data: tCashIn,
+              backgroundColor: 'rgba(59, 130, 246, 0.7)',
+              borderColor: 'rgb(59, 130, 246)',
               borderWidth: 1,
               stack: 'cash_in'
             },
             { 
-              label: 'Money Out', 
-              data: tOut, 
-              backgroundColor: 'rgba(220, 53, 69, 0.7)',
-              borderColor: 'rgb(220, 53, 69)',
+              label: 'Money Out',
+              data: tOut,
+              backgroundColor: 'rgba(239, 68, 68, 0.7)',
+              borderColor: 'rgb(239, 68, 68)',
               borderWidth: 1,
               stack: 'out'
             },
             { 
-              label: 'Cash Withdrawals', 
-              data: tCashOut, 
-              backgroundColor: 'rgba(255, 193, 7, 0.7)',
-              borderColor: 'rgb(255, 193, 7)',
+              label: 'Cash Withdrawals',
+              data: tCashOut,
+              backgroundColor: 'rgba(245, 158, 11, 0.7)',
+              borderColor: 'rgb(245, 158, 11)',
               borderWidth: 1,
               stack: 'cash_out'
             }

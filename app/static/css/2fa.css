@@ -1,66 +1,40 @@
 /* ==========================================================
-   Agora Consulting – 2FA Verification Styles
+   Scrutinise TXN – 2FA Verification Styles
    ========================================================== */
 
 body {
-  min-height: 100vh;
-  display: flex;
-  background: linear-gradient(135deg, var(--agora-neutral-100, #F5F5FA) 0%, #d1e8e9 100%);
+  min-height: 100vh; display: flex;
+  background: linear-gradient(135deg, #F1F5F9 0%, #dce3ea 100%);
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
-.auth-container {
-  display: flex;
-  width: 100%;
-  min-height: 100vh;
-}
+.auth-container { display: flex; width: 100%; min-height: 100vh; }
 .brand-panel {
   flex: 1;
-  background: #005F6B;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding: 3rem;
-  color: white;
+  background: linear-gradient(145deg, #0F1923 0%, #1A2530 40%, #3D4F5F 100%);
+  display: flex; flex-direction: column;
+  justify-content: center; align-items: center;
+  padding: 3rem; color: white;
 }
-.brand-panel img {
-  max-width: 320px;
-  margin-bottom: 2rem;
-}
+.brand-panel img { max-width: 320px; margin-bottom: 2rem; }
 .form-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  padding: 3rem;
-  background: white;
+  flex: 1; display: flex; flex-direction: column;
+  justify-content: center; align-items: center;
+  padding: 3rem; background: white;
 }
-.auth-card {
-  width: 100%;
-  max-width: 400px;
-}
+.auth-card { width: 100%; max-width: 400px; }
 .code-input {
-  font-size: 1.5rem;
-  letter-spacing: 0.5rem;
-  text-align: center;
+  font-size: 1.5rem; letter-spacing: 0.5rem; text-align: center;
   font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
-.shield-icon {
-  font-size: 4rem;
-  color: #005F6B;
-  margin-bottom: 1rem;
-}
-@media (max-width: 768px) {
-  .brand-panel { display: none; }
-}
+.shield-icon { font-size: 3.5rem; color: #E8913A; margin-bottom: 1rem; }
 
-/* --- 2FA Setup utilities --- */
+@media (max-width: 768px) { .brand-panel { display: none; } }
+
 .u-maxw-200 { max-width: 200px; }
 .u-break-all { word-break: break-all; }
 .u-code-input { letter-spacing: 0.5rem; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
 
-/* --- 2FA Backup codes print styles --- */
 @media print {
   .btn, .alert-info { display: none !important; }
   .card-footer { display: none !important; }

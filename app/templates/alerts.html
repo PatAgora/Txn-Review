@@ -6,12 +6,10 @@
 <div class="container-fluid py-4">
 
 {% if no_customer %}
-  <div class="d-flex justify-content-center align-items-center" style="min-height:55vh;">
-    <div class="text-center text-muted">
-      <i class="bi bi-shield-exclamation" style="font-size:3rem;"></i>
-      <h4 class="mt-3">No Customer Selected</h4>
-      <p>Use the search bar above to enter a Customer ID, then navigate to Alerts to view their alerts.</p>
-    </div>
+  <div class="empty-state">
+    <div class="empty-icon"><i class="bi bi-shield-exclamation"></i></div>
+    <h4>No Customer Selected</h4>
+    <p>Use the search bar above to enter a Customer ID, then navigate to Alerts to view their alerts.</p>
   </div>
 {% else %}
 

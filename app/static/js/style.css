@@ -1,3 +1,1 @@
-.kpi { border-left: 6px solid #005F6B; }
-.kpi .kpi-label { font-size: .8rem; color: #4A4A68; text-transform: uppercase; letter-spacing: .06em; }
-.kpi .kpi-value { font-size: 1.6rem; font-weight: 700; }
+/* KPI styles are now in app.css — this file intentionally left empty */
