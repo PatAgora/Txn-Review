@@ -1,49 +1,261 @@
 /* ==========================================================
-   Scrutinise TXN – Main Application Styles
-   Extracted from inline <style> blocks for CSP compliance
+   Agora Consulting – Transaction Review Application Styles
    ========================================================== */
 
-/* --- Layout: sidebar + content --- */
-body { overflow-x: hidden; }
-.sidebar {
-  height: 100vh; position: fixed; top: 0; left: 0; width: 240px;
-  background-color: #212529; color: #fff; padding: 0.75rem 0.75rem 1rem;
-  display: flex; flex-direction: column;
+/* --- Design Tokens --- */
+:root {
+  /* Agora Colour Palette */
+  --agora-primary:       #005F6B;
+  --agora-primary-dark:  #004C58;
+  --agora-primary-light: #E0F4F5;
+  --agora-secondary:     #FF6F61;
+  --agora-secondary-dark:#E5564A;
+  --agora-accent:        #F5A623;
+  --agora-neutral-900:   #1A1A2E;
+  --agora-neutral-700:   #4A4A68;
+  --agora-neutral-400:   #9E9EB8;
+  --agora-neutral-100:   #F5F5FA;
+  --agora-neutral-0:     #FFFFFF;
+  --agora-success:       #2ECC71;
+  --agora-error:         #E74C3C;
+  --agora-info:          #3498DB;
+
+  /* Spacing */
+  --spacing-xs:  4px;
+  --spacing-sm:  8px;
+  --spacing-md:  16px;
+  --spacing-lg:  24px;
+  --spacing-xl:  32px;
+  --spacing-2xl: 48px;
+
+  /* Radius */
+  --radius-sm:  4px;
+  --radius-md:  8px;
+  --radius-lg:  12px;
+  --radius-xl:  16px;
+
+  /* Shadows */
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md:  0 4px 6px rgba(0,0,0,0.07);
+  --shadow-lg:  0 10px 15px rgba(0,0,0,0.1);
 }
+
+/* --- Typography --- */
+body {
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-weight: 400;
+  color: var(--agora-neutral-900);
+  background-color: var(--agora-neutral-100);
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  font-weight: 600;
+  color: var(--agora-neutral-900);
+}
+
+/* --- Layout: sidebar + content --- */
+.sidebar {
+  height: 100vh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 240px;
+  background-color: var(--agora-primary);
+  color: #fff;
+  padding: 0.75rem 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+}
+
 .brand { padding: 8px 0; }
 .brand img { max-width: 180px; height: auto; }
-.sidebar .nav-link { color: #cfd3da; padding: .45rem .75rem; border-radius: .5rem; }
-.sidebar .nav-link.active, .sidebar .nav-link:hover { color: #fff; background: #2f3640; }
-.sidebar .accordion-button { background: transparent; color: #e9ecef; padding: .5rem .75rem; }
-.sidebar .accordion-button:not(.collapsed) { background: #2f3640; color: #fff; }
-.sidebar .accordion-body { padding: .5rem .25rem .75rem 0.5rem; }
-.content { margin-left: 240px; padding: 1rem; }
+.powered-by {
+  font-size: 0.65rem;
+  color: rgba(255,255,255,0.5);
+  letter-spacing: 0.05em;
+  padding-left: 2px;
+  margin-top: 2px;
+}
+
+.sidebar .nav-link {
+  color: rgba(255,255,255,0.75);
+  padding: .45rem .75rem;
+  border-radius: var(--radius-md);
+  transition: background 0.2s, color 0.2s;
+  font-size: 0.9rem;
+}
+.sidebar .nav-link.active,
+.sidebar .nav-link:hover {
+  color: #fff;
+  background: var(--agora-primary-dark);
+}
+
+.sidebar .accordion-button {
+  background: transparent;
+  color: rgba(255,255,255,0.85);
+  padding: .5rem .75rem;
+  font-weight: 500;
+}
+.sidebar .accordion-button:not(.collapsed) {
+  background: var(--agora-primary-dark);
+  color: #fff;
+}
+.sidebar .accordion-button::after {
+  filter: brightness(0) invert(1);
+}
+.sidebar .accordion-body {
+  padding: .5rem .25rem .75rem 0.5rem;
+}
+
+.content {
+  margin-left: 240px;
+  padding: var(--spacing-lg);
+}
 
 /* --- KPI cards --- */
-.kpi { border-left: 6px solid #ff6b35; }
-.kpi .kpi-label { font-size: .8rem; color: #6c757d; text-transform: uppercase; letter-spacing: .06em; }
-.kpi .kpi-value { font-size: 1.6rem; font-weight: 700; }
+.kpi {
+  border-left: 6px solid var(--agora-primary);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s, transform 0.15s;
+}
+.kpi:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.kpi .kpi-label {
+  font-size: .8rem;
+  color: var(--agora-neutral-700);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-weight: 500;
+}
+.kpi .kpi-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--agora-neutral-900);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+}
 
 /* --- Top bar --- */
-.topbar { display: flex; align-items: center; gap: .75rem; margin-bottom: .75rem; }
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin-bottom: var(--spacing-lg);
+  padding-bottom: var(--spacing-md);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
 .topbar .spacer { flex: 1; }
-.topbar .page-title { font-size: 1.4rem; font-weight: 600; color: #1a202c; margin: 0; white-space: nowrap; }
+.topbar .page-title {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--agora-neutral-900);
+  margin: 0;
+  white-space: nowrap;
+}
 
 /* --- User info in sidebar --- */
 .user-info {
   margin-top: auto;
   padding: 0.75rem;
-  border-top: 1px solid #3a3f47;
+  border-top: 1px solid rgba(255,255,255,0.15);
   font-size: 0.85rem;
 }
-.user-info .username { font-weight: 600; }
+.user-info .username {
+  font-weight: 600;
+  color: #fff;
+}
 .user-info .role-badge {
   font-size: 0.7rem;
   padding: 0.2rem 0.5rem;
-  border-radius: 0.25rem;
+  border-radius: var(--radius-sm);
 }
 
-/* --- Utility classes (replacing inline style= attributes) --- */
+/* --- Bootstrap overrides for Agora branding --- */
+.btn-primary {
+  background-color: var(--agora-primary);
+  border-color: var(--agora-primary);
+}
+.btn-primary:hover, .btn-primary:focus {
+  background-color: var(--agora-primary-dark);
+  border-color: var(--agora-primary-dark);
+}
+.btn-primary:active {
+  background-color: var(--agora-primary-dark);
+  border-color: var(--agora-primary-dark);
+}
+
+.btn-outline-primary {
+  color: var(--agora-primary);
+  border-color: var(--agora-primary);
+}
+.btn-outline-primary:hover {
+  background-color: var(--agora-primary);
+  border-color: var(--agora-primary);
+  color: #fff;
+}
+
+.form-control:focus {
+  border-color: var(--agora-primary);
+  box-shadow: 0 0 0 0.2rem rgba(0,95,107,0.2);
+}
+
+.form-select:focus {
+  border-color: var(--agora-primary);
+  box-shadow: 0 0 0 0.2rem rgba(0,95,107,0.2);
+}
+
+a {
+  color: var(--agora-primary);
+}
+a:hover {
+  color: var(--agora-primary-dark);
+}
+
+/* Card styling */
+.card {
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(0,0,0,0.06);
+  box-shadow: var(--shadow-sm);
+}
+.card-header {
+  background-color: var(--agora-neutral-100);
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+  font-weight: 600;
+  color: var(--agora-neutral-900);
+}
+
+/* Table styling */
+.table {
+  font-size: 0.9rem;
+}
+.table thead th {
+  background-color: var(--agora-neutral-100);
+  color: var(--agora-neutral-700);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  border-bottom: 2px solid var(--agora-primary-light);
+}
+
+/* Badge overrides */
+.badge.bg-danger { background-color: var(--agora-error) !important; }
+.badge.bg-success { background-color: var(--agora-success) !important; }
+.badge.bg-info { background-color: var(--agora-info) !important; }
+.badge.bg-warning { background-color: var(--agora-accent) !important; color: #fff !important; }
+
+/* Alert overrides */
+.alert-info {
+  background-color: var(--agora-primary-light);
+  border-color: var(--agora-primary);
+  color: var(--agora-primary-dark);
+}
+
+/* --- Utility classes --- */
 .u-nowrap { white-space: nowrap; }
 .u-prewrap { white-space: pre-wrap; }
 .u-ellipsis-280 { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -56,11 +268,11 @@ body { overflow-x: hidden; }
 .u-h-260 { height: 260px; }
 .u-h-300 { height: 300px; }
 .u-h-320 { height: 320px; }
-.u-kpi-red { border-left-color: #dc3545 !important; }
-.u-kpi-amber { border-left-color: #ffc107 !important; }
-.u-print-comments { display: none; padding: 12px; background: #fff; border: 1px solid #e2e8f0; border-radius: 6px; min-height: 100px; }
+.u-kpi-red { border-left-color: var(--agora-error) !important; }
+.u-kpi-amber { border-left-color: var(--agora-accent) !important; }
+.u-print-comments { display: none; padding: 12px; background: #fff; border: 1px solid rgba(0,0,0,0.08); border-radius: var(--radius-md); min-height: 100px; }
 
 /* --- 2FA utility classes --- */
 .u-maxw-200 { max-width: 200px; }
 .u-break-all { word-break: break-all; }
-.u-code-input { letter-spacing: 0.5rem; font-family: monospace; }
+.u-code-input { letter-spacing: 0.5rem; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }

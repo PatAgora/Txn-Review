@@ -4,6 +4,9 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Transaction Review Tool</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link href="{{ url_for('static', filename='vendor/css/bootstrap.min.css') }}" rel="stylesheet">
     <script src="{{ url_for('static', filename='vendor/js/bootstrap.bundle.min.js') }}" defer></script>
     <script src="{{ url_for('static', filename='vendor/js/chart.umd.min.js') }}" defer></script>
@@ -17,6 +20,7 @@
           <a href="{{ url_for('dashboard') }}">
             <img src="{{ url_for('static', filename='scrutinise-txn-logo.png') }}" alt="Scrutinise TXN">
           </a>
+          <div class="powered-by">Powered by Agora</div>
         </div>
       </div>
 
@@ -32,7 +36,7 @@
             <div class="accordion-body">
               <nav class="nav flex-column">
                 <a class="nav-link {% if request.endpoint == 'upload' %}active{% endif %}"
-                   href="{{ url_for('upload') }}">⬆️ Data &amp; Ingest</a>
+                   href="{{ url_for('upload') }}">Data &amp; Ingest</a>
               </nav>
             </div>
           </div>
@@ -49,15 +53,15 @@
             <div class="accordion-body">
               <nav class="nav flex-column">
                 <a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}"
-                   href="{{ url_for('dashboard', customer_id=cust) if cust else url_for('dashboard') }}">📊 Dashboard</a>
+                   href="{{ url_for('dashboard', customer_id=cust) if cust else url_for('dashboard') }}">Dashboard</a>
                 <a class="nav-link {% if request.endpoint == 'alerts' %}active{% endif %}"
-                   href="{{ url_for('alerts', customer_id=cust) if cust else url_for('alerts') }}">🚨 Alerts</a>
+                   href="{{ url_for('alerts', customer_id=cust) if cust else url_for('alerts') }}">Alerts</a>
                 <a class="nav-link {% if request.endpoint == 'explore' %}active{% endif %}"
-                   href="{{ url_for('explore', customer_id=cust) if cust else url_for('explore') }}">🔎 Explore</a>
+                   href="{{ url_for('explore', customer_id=cust) if cust else url_for('explore') }}">Explore</a>
                 <a class="nav-link {% if request.endpoint == 'ai_analysis' %}active{% endif %}"
-                   href="{{ url_for('ai_analysis', customer_id=cust) if cust else url_for('ai_analysis') }}">🤖 AI Outreach</a>
+                   href="{{ url_for('ai_analysis', customer_id=cust) if cust else url_for('ai_analysis') }}">AI Outreach</a>
                 <a class="nav-link {% if request.endpoint == 'ai_rationale' %}active{% endif %}"
-                   href="{{ url_for('ai_rationale', customer_id=cust) if cust else url_for('ai_rationale') }}">🧠 AI Rationale</a>
+                   href="{{ url_for('ai_rationale', customer_id=cust) if cust else url_for('ai_rationale') }}">AI Rationale</a>
               </nav>
             </div>
           </div>
@@ -75,7 +79,7 @@
             <div class="accordion-body">
               <nav class="nav flex-column">
                 <a class="nav-link {% if request.endpoint == 'manager_dashboard' %}active{% endif %}"
-                   href="{{ url_for('manager_dashboard') }}">📈 Team Dashboard</a>
+                   href="{{ url_for('manager_dashboard') }}">Team Dashboard</a>
               </nav>
             </div>
           </div>
@@ -94,15 +98,15 @@
             <div class="accordion-body">
               <nav class="nav flex-column">
                 <a class="nav-link {% if request.endpoint == 'admin_customers' %}active{% endif %}"
-                   href="{{ url_for('admin_customers') }}">👥 Customers</a>
+                   href="{{ url_for('admin_customers') }}">Customers</a>
                 <a class="nav-link {% if request.endpoint in ['admin_users', 'admin_smtp'] %}active{% endif %}"
-                   href="{{ url_for('admin_users') }}">🔐 Users & Security</a>
+                   href="{{ url_for('admin_users') }}">Users &amp; Security</a>
                 <a class="nav-link {% if request.endpoint == 'admin' %}active{% endif %}"
-                   href="{{ url_for('admin') }}">⚙️ Rules & Settings</a>
+                   href="{{ url_for('admin') }}">Rules &amp; Settings</a>
                 <a class="nav-link {% if request.endpoint == 'admin_audit_log' %}active{% endif %}"
-                   href="{{ url_for('admin_audit_log') }}">📋 Audit Log</a>
+                   href="{{ url_for('admin_audit_log') }}">Audit Log</a>
                 <a class="nav-link {% if request.endpoint == 'admin_usage_report' %}active{% endif %}"
-                   href="{{ url_for('admin_usage_report') }}">📊 Usage Report</a>
+                   href="{{ url_for('admin_usage_report') }}">Usage Report</a>
               </nav>
             </div>
           </div>
@@ -122,7 +126,7 @@
           </div>
         </div>
         <div class="d-flex gap-2">
-          <a href="{{ url_for('manage_2fa') }}" class="btn btn-sm btn-outline-light flex-fill" title="Security Settings">🔒</a>
+          <a href="{{ url_for('manage_2fa') }}" class="btn btn-sm btn-outline-light flex-fill" title="Security Settings">Security</a>
           <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-light flex-fill">Logout</a>
         </div>
       </div>
@@ -142,7 +146,7 @@
             type="text"
             name="customer_id"
             class="form-control form-control-sm u-maxw-260"
-            placeholder="Search by Customer ID…"
+            placeholder="Search by Customer ID..."
             value="{{ cust or '' }}"
           >
           <button class="btn btn-sm btn-primary">Search</button>

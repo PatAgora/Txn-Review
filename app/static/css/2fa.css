@@ -1,12 +1,12 @@
 /* ==========================================================
-   Scrutinise TXN – 2FA Verification Styles
-   Extracted from verify_2fa.html for CSP compliance
+   Agora Consulting – 2FA Verification Styles
    ========================================================== */
 
 body {
   min-height: 100vh;
   display: flex;
-  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  background: linear-gradient(135deg, var(--agora-neutral-100, #F5F5FA) 0%, #d1e8e9 100%);
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
 }
 .auth-container {
   display: flex;
@@ -15,7 +15,7 @@ body {
 }
 .brand-panel {
   flex: 1;
-  background: #202429;
+  background: #005F6B;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -44,21 +44,21 @@ body {
   font-size: 1.5rem;
   letter-spacing: 0.5rem;
   text-align: center;
-  font-family: monospace;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
 }
 .shield-icon {
   font-size: 4rem;
-  color: #ff6b35;
+  color: #005F6B;
   margin-bottom: 1rem;
 }
 @media (max-width: 768px) {
   .brand-panel { display: none; }
 }
 
-/* --- 2FA Setup utilities (setup_2fa.html inline replacements) --- */
+/* --- 2FA Setup utilities --- */
 .u-maxw-200 { max-width: 200px; }
 .u-break-all { word-break: break-all; }
-.u-code-input { letter-spacing: 0.5rem; font-family: monospace; }
+.u-code-input { letter-spacing: 0.5rem; font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace; }
 
 /* --- 2FA Backup codes print styles --- */
 @media print {
