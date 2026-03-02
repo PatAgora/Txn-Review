@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block page_title %}Usage Report{% endblock %}
+{% block content %}
+<p class="text-muted">Platform usage by user type, user, and calendar month.</p>
+
+<!-- Type Summaries -->
+<div class="row mb-4">
+  {% for utype, totals in type_totals.items() | sort %}
+  <div class="col-md-6">
+    <div class="card">
+      <div class="card-body">
+        <h6 class="card-title">
+          {% if utype == 'Remediation' %}
+            <span class="badge bg-warning text-dark">Remediation</span>
+          {% else %}
+            <span class="badge bg-info">BAU</span>
+          {% endif %}
+          Totals
+        </h6>
+        <div class="row text-center">
+          <div class="col">
+            <div class="fs-4 fw-bold">{{ totals.statements }}</div>
+            <small class="text-muted">Statements</small>
+          </div>
+          <div class="col">
+            <div class="fs-4 fw-bold">{{ totals.records }}</div>
+            <small class="text-muted">Records</small>
+          </div>
+          <div class="col">
+            <div class="fs-4 fw-bold">{{ totals.alerts }}</div>
+            <small class="text-muted">Rules Fired</small>
+          </div>
+          <div class="col">
+            <div class="fs-4 fw-bold">{{ totals.avg_rules_per_statement }}</div>
+            <small class="text-muted">Avg Rules/Statement</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="col">
+    <div class="alert alert-info">No usage data yet. Upload statements to populate this report.</div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Detailed Report Table -->
+<div class="card">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Monthly Breakdown</h5>
+
+    {% if report %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Month</th>
+            <th>User</th>
+            <th>Type</th>
+            <th class="text-end">Statements Uploaded</th>
+            <th class="text-end">Transaction Records</th>
+            <th class="text-end">Rules Fired</th>
+            <th class="text-end">Avg Rules / Statement</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in report %}
+          <tr>
+            <td><strong>{{ row.month }}</strong></td>
+            <td>{{ row.username }}</td>
+            <td>
+              {% if row.user_type == 'Remediation' %}
+                <span class="badge bg-warning text-dark">Remediation</span>
+              {% else %}
+                <span class="badge bg-info">BAU</span>
+              {% endif %}
+            </td>
+            <td class="text-end">{{ row.statements }}</td>
+            <td class="text-end">{{ row.records }}</td>
+            <td class="text-end">{{ row.alerts }}</td>
+            <td class="text-end">{{ row.avg_rules_per_statement }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-muted">No usage data available.</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Rule Type Breakdown -->
+{% if all_rule_types and report %}
+<div class="card mt-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Rules Fired by Type</h5>
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Month</th>
+            <th>User</th>
+            <th>Type</th>
+            {% for rt in all_rule_types %}
+            <th class="text-end">{{ rt | replace('_', ' ') | title }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in report %}
+          {% if row.rule_breakdown %}
+          <tr>
+            <td><strong>{{ row.month }}</strong></td>
+            <td>{{ row.username }}</td>
+            <td>
+              {% if row.user_type == 'Remediation' %}
+                <span class="badge bg-warning text-dark">Rem</span>
+              {% else %}
+                <span class="badge bg-info">BAU</span>
+              {% endif %}
+            </td>
+            {% for rt in all_rule_types %}
+            <td class="text-end">{{ row.rule_breakdown.get(rt, '') }}</td>
+            {% endfor %}
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

@@ -1,0 +1,279 @@
+{% extends "base.html" %}
+{% block page_title %}Transaction Dashboard{% endblock %}
+{% block content %}
+
+{% if overview_mode %}
+<!-- ==================== NO CUSTOMER SELECTED ==================== -->
+<div class="d-flex justify-content-center align-items-center" style="min-height: 60vh;">
+  <div class="text-center">
+    <i class="bi bi-search" style="font-size: 3rem; color: #adb5bd;"></i>
+    <h4 class="text-muted mt-3">No Customer Selected</h4>
+    <p class="text-muted">Use the search bar above to enter a Customer ID and view their transaction dashboard.</p>
+  </div>
+</div>
+
+{% elif filter_meta and filter_meta.customer_id %}
+<!-- ==================== CUSTOMER-SPECIFIC MODE ==================== -->
+
+<!-- KPI tiles (clickable) -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <a class="text-decoration-none" href="{{ url_for('explore', customer_id=filter_meta.customer_id) }}">
+      <div class="card kpi"><div class="card-body">
+        <div class="kpi-label">Total Money In</div>
+        <div class="kpi-value">£{{ "{:,.2f}".format(tiles.total_in or 0) }}</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="text-decoration-none" href="{{ url_for('explore', direction='out', customer_id=filter_meta.customer_id) }}">
+      <div class="card kpi"><div class="card-body">
+        <div class="kpi-label">Total Money Out</div>
+        <div class="kpi-value">£{{ "{:,.2f}".format(tiles.total_out or 0) }}</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="text-decoration-none" href="{{ url_for('explore', channel='cash', direction='in', customer_id=filter_meta.customer_id) }}">
+      <div class="card kpi"><div class="card-body">
+        <div class="kpi-label">Total Cash Deposits</div>
+        <div class="kpi-value">£{{ "{:,.2f}".format(tiles.cash_in or 0) }}</div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-md-3">
+    <a class="text-decoration-none" href="{{ url_for('explore', channel='cash', direction='out', customer_id=filter_meta.customer_id) }}">
+      <div class="card kpi"><div class="card-body">
+        <div class="kpi-label">Total Cash Withdrawals</div>
+        <div class="kpi-value">£{{ "{:,.2f}".format(tiles.cash_out or 0) }}</div>
+      </div></div>
+    </a>
+  </div>
+</div>
+
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <a class="text-decoration-none"
+       href="{{ url_for('explore', risk='HIGH,HIGH_3RD,PROHIBITED', customer_id=filter_meta.customer_id) }}">
+      <div class="card kpi"><div class="card-body">
+        <div class="kpi-label">Payments to High/High-3rd/Prohibited</div>
+        <div class="kpi-value">
+          £{{ "{:,.2f}".format(tiles.high_risk_total or 0) }}
+        </div>
+      </div></div>
+    </a>
+  </div>
+  <div class="col-md-6">
+    <div class="card kpi"><div class="card-body">
+      <div class="kpi-label">Critical Alerts</div>
+      <div class="kpi-value">{{ "{:,}".format(kpis.critical or 0) }}</div>
+    </div></div>
+  </div>
+</div>
+
+<!-- Monthly Cash Flow Chart (All Time) -->
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="card">
+      <div class="card-header fw-semibold">
+        Monthly Cash Flow (All Time) — {{ filter_meta.customer_id }}
+      </div>
+      <div class="card-body" class="u-h-320">
+        <canvas id="monthlyCashFlow"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card">
+      <div class="card-header fw-semibold">
+        Top Countries (alerts) — {{ filter_meta.customer_id }}
+      </div>
+      <div class="card-body">
+        <ol class="mb-0">
+          {% for row in top_countries %}
+          <li>{{ row.name or row.iso2 or 'Unknown' }} — {{ row.cnt }}</li>
+          {% else %}
+          <li>No data</li>
+          {% endfor %}
+        </ol>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Reviewer metrics -->
+<div class="card mt-4 mb-2">
+  <div class="card-header fw-semibold">Reviewer Metrics</div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Avg Cash Deposits</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.avg_cash_deposits or 0) }}</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Avg Cash Withdrawals</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.avg_cash_withdrawals or 0) }}</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Avg Payment In</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.avg_in or 0) }}</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Avg Payment Out</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.avg_out or 0) }}</div>
+        </div>
+      </div>
+
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Highest Payment In</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.max_in or 0) }}</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Highest Payment Out</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.max_out or 0) }}</div>
+        </div>
+      </div>
+
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Overseas In</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.overseas_in or 0) }}</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">Overseas Out</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.overseas_out or 0) }}</div>
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="border rounded p-3 h-100">
+          <div class="text-muted small">High/High-3rd/Prohibited (Value)</div>
+          <div class="fs-5 fw-semibold">£{{ "{:,.2f}".format(metrics.highrisk_value or 0) }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+<script>
+  function withCommas(value) {
+    if (value === null || value === undefined) return '';
+    return value.toLocaleString();
+  }
+
+  function drawCharts() {
+    if (typeof Chart === 'undefined') return;
+
+    // Monthly Cash Flow (All Time) - combined chart with money in/out and cash deposits/withdrawals
+    const mcf = document.getElementById('monthlyCashFlow');
+    const tLabels = {{ (trend_labels|default([]))|tojson }};
+    const tIn = {{ (trend_in|default([]))|tojson }};
+    const tOut = {{ (trend_out|default([]))|tojson }};
+    const tCashIn = {{ (trend_cash_in|default([]))|tojson }};
+    const tCashOut = {{ (trend_cash_out|default([]))|tojson }};
+    
+    if (mcf && tLabels && tLabels.length) {
+      new Chart(mcf, {
+        type: 'bar',
+        data: {
+          labels: tLabels,
+          datasets: [
+            { 
+              label: 'Money In', 
+              data: tIn, 
+              backgroundColor: 'rgba(25, 135, 84, 0.7)',
+              borderColor: 'rgb(25, 135, 84)',
+              borderWidth: 1,
+              stack: 'in'
+            },
+            { 
+              label: 'Cash Deposits', 
+              data: tCashIn, 
+              backgroundColor: 'rgba(13, 202, 240, 0.7)',
+              borderColor: 'rgb(13, 202, 240)',
+              borderWidth: 1,
+              stack: 'cash_in'
+            },
+            { 
+              label: 'Money Out', 
+              data: tOut, 
+              backgroundColor: 'rgba(220, 53, 69, 0.7)',
+              borderColor: 'rgb(220, 53, 69)',
+              borderWidth: 1,
+              stack: 'out'
+            },
+            { 
+              label: 'Cash Withdrawals', 
+              data: tCashOut, 
+              backgroundColor: 'rgba(255, 193, 7, 0.7)',
+              borderColor: 'rgb(255, 193, 7)',
+              borderWidth: 1,
+              stack: 'cash_out'
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: {
+              beginAtZero: true,
+              ticks: { callback: (val) => '£' + withCommas(val) }
+            },
+            x: {
+              ticks: {
+                maxRotation: 45,
+                minRotation: 45
+              }
+            }
+          },
+          plugins: {
+            legend: {
+              position: 'top',
+              labels: {
+                usePointStyle: true,
+                padding: 15
+              }
+            },
+            tooltip: {
+              callbacks: {
+                label: ctx => `${ctx.dataset.label}: £${withCommas(ctx.parsed.y)}`
+              }
+            }
+          }
+        }
+      });
+    }
+  }
+
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    setTimeout(drawCharts, 0);
+  } else {
+    document.addEventListener('DOMContentLoaded', drawCharts);
+  }
+</script>
+
+{% else %}
+<!-- Fallback empty state -->
+<div class="card">
+  <div class="card-body text-center py-5">
+    <h5>No data available</h5>
+    <p class="text-muted">Upload customer data and transactions to see metrics.</p>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

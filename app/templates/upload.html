@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block page_title %}Data & Ingest{% endblock %}
+{% block content %}
+
+<!-- Summary Stats -->
+{% if stats %}
+<div class="row g-3 mb-4">
+  <div class="col-md-4">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="text-muted small">Customers</div>
+        <div class="fs-3 fw-bold">{{ stats.total_customers }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="text-muted small">Statements Uploaded</div>
+        <div class="fs-3 fw-bold">{{ stats.total_statements }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card text-center">
+      <div class="card-body py-3">
+        <div class="text-muted small">Transactions</div>
+        <div class="fs-3 fw-bold">{{ "{:,}".format(stats.total_transactions) }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- Step 1: Add Customer -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-1">Step 1 — Add a Customer</h5>
+    <p class="text-muted small mb-3">Create a new customer, or skip this step if the customer already exists.</p>
+
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="add_customer">
+      <div class="row g-2 align-items-end">
+        <div class="col-md-4">
+          <label class="form-label small">Customer ID *</label>
+          <input type="text" name="new_customer_id" class="form-control form-control-sm" placeholder="e.g. 30030001" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label small">Customer Name</label>
+          <input type="text" name="new_customer_name" class="form-control form-control-sm" placeholder="e.g. Acme Ltd">
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-sm btn-outline-primary w-100">Add Customer</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Step 2: Upload Transactions -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title mb-1">Step 2 — Upload Transactions</h5>
+    <p class="text-muted small mb-3">Select a customer and upload their transaction statement (Excel or CSV).</p>
+
+    {% if not customers %}
+    <div class="alert alert-info mb-0">
+      No customers yet. Add a customer above to get started.
+    </div>
+    {% else %}
+    <form method="post" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="upload">
+      <div class="row g-3 align-items-end">
+        <div class="col-md-3">
+          <label class="form-label">Select Customer *</label>
+          <select name="customer_id" class="form-select" required onchange="window.location.href='{{ url_for('upload') }}?customer_id=' + this.value">
+            <option value="">-- Select a customer --</option>
+            {% for c in customers %}
+            <option value="{{ c.customer_id }}" {% if selected_customer == c.customer_id %}selected{% endif %}>
+              {{ c.customer_id }}{% if c.customer_name %} - {{ c.customer_name }}{% endif %}
+            </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Account (optional)</label>
+          <input type="text" name="account_name" class="form-control"
+                 placeholder="e.g. Current Account, Savings"
+                 {% if not selected_customer %}disabled{% endif %}>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Transaction File *</label>
+          <input class="form-control" type="file" name="tx_file" accept=".xlsx,.xls,.csv" {% if not selected_customer %}disabled{% endif %}>
+        </div>
+        <div class="col-md-2">
+          <button class="btn btn-primary w-100" {% if not selected_customer %}disabled{% endif %}>
+            Upload & Process
+          </button>
+        </div>
+      </div>
+    </form>
+
+    {% if not selected_customer %}
+    <div class="alert alert-info mt-3 mb-0">
+      Select a customer to enable file upload.
+    </div>
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+
+<!-- Statement History for Selected Customer -->
+{% if selected_customer %}
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="card-title mb-0">Statement History — {{ selected_customer }}</h5>
+      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('dashboard', customer_id=selected_customer) }}">View Dashboard</a>
+    </div>
+
+    {% if statements %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped">
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Account</th>
+            <th>Uploaded By</th>
+            <th>Uploaded At</th>
+            <th>Records</th>
+            <th>Date Range</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in statements %}
+          <tr>
+            <td>{{ s.filename or '—' }}</td>
+            <td>{{ s.account_name or '—' }}</td>
+            <td>{{ s.uploaded_by_name or '—' }}</td>
+            <td>{{ s.uploaded_at.strftime('%d/%m/%Y %H:%M') if s.uploaded_at else '—' }}</td>
+            <td>{{ s.record_count or 0 }}</td>
+            <td>
+              {% if s.date_from and s.date_to %}
+                {{ s.date_from }} to {{ s.date_to }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-muted mb-0">No statements uploaded yet for this customer.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+<!-- File Format Reference (collapsed by default) -->
+<div class="card">
+  <div class="card-body">
+    <h6 class="mb-0">
+      <a class="text-decoration-none text-muted" data-bs-toggle="collapse" href="#formatRef" role="button" aria-expanded="false">
+        Transaction File Format Reference ▸
+      </a>
+    </h6>
+    <div class="collapse mt-3" id="formatRef">
+      <p class="text-muted small">
+        Upload an Excel (.xlsx) or CSV file. The system auto-detects the column format.
+        All transactions must have the same <code>Account ID</code> as the selected customer.
+      </p>
+      <h6>Required Columns (CBS Format)</h6>
+      <div class="table-responsive">
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Column</th>
+              <th>Description</th>
+              <th>Example</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>Transaction ID</code></td><td>Unique transaction ID</td><td>TXN-001</td></tr>
+            <tr><td><code>Transaction Date</code></td><td>Transaction date</td><td>15/01/2024</td></tr>
+            <tr><td><code>Account ID</code></td><td>Must match selected customer</td><td>CUST001</td></tr>
+            <tr><td><code>Debit/Credit</code></td><td><code>Debit</code> or <code>Credit</code></td><td>Credit</td></tr>
+            <tr><td><code>Base Amount</code></td><td>Amount (with currency prefix)</td><td>GBP 5,000.00</td></tr>
+            <tr><td><code>Transaction Type</code></td><td>Type of transaction</td><td>Transfer</td></tr>
+            <tr><td><code>Transaction Channel</code></td><td>Payment channel</td><td>wire</td></tr>
+            <tr><td><code>Instrument</code></td><td>Payment instrument</td><td>SWIFT</td></tr>
+            <tr><td><code>Originating Customer</code></td><td>Sender name</td><td>Acme Ltd</td></tr>
+            <tr><td><code>Originating Bank</code></td><td>Sender's bank</td><td>Barclays UK</td></tr>
+            <tr><td><code>Beneficiary Customer</code></td><td>Recipient name</td><td>Smith Corp</td></tr>
+            <tr><td><code>Beneficiary Bank</code></td><td>Recipient's bank</td><td>HSBC UK</td></tr>
+            <tr><td><code>Description</code></td><td>Transaction narrative</td><td>Invoice payment</td></tr>
+            <tr><td><code>Posting Date</code></td><td>Date posted to account</td><td>16/01/2024</td></tr>
+            <tr><td><code>Counterparty Account No</code></td><td>Counterparty account number</td><td>12345678</td></tr>
+            <tr><td><code>Counterparty Bank Code</code></td><td>Counterparty bank/sort code</td><td>40-00-01</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

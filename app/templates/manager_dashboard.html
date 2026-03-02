@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block page_title %}{{ team_label }} Manager Dashboard{% endblock %}
+{% block content %}
+
+<h5 class="mb-4">{{ team_label }} Team Performance</h5>
+
+<!-- Row 1: Users & Customers -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Total Team Users</div>
+        <div class="kpi-value">{{ "{:,}".format(total_team_users or 0) }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Users Logged In</div>
+        <div class="kpi-value">{{ "{:,}".format(users_logged_in or 0) }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Total Customers</div>
+        <div class="kpi-value">{{ "{:,}".format(total_customers or 0) }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Total Statements</div>
+        <div class="kpi-value">{{ "{:,}".format(total_statements or 0) }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 2: Transactions & Alerts -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Total Transactions</div>
+        <div class="kpi-value">{{ "{:,}".format(total_transactions or 0) }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Avg Transactions / Customer</div>
+        <div class="kpi-value">{{ avg_transactions }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Avg Accounts / Customer</div>
+        <div class="kpi-value">{{ avg_accounts }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Awaiting Outreach</div>
+        <div class="kpi-value">{{ "{:,}".format(awaiting_outreach or 0) }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 3: Alerts -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Total Alerts</div>
+        <div class="kpi-value">{{ "{:,}".format(total_alerts or 0) }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="card kpi">
+      <div class="card-body">
+        <div class="kpi-label">Avg Alerts / Customer</div>
+        <div class="kpi-value">{{ avg_alerts }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Customers by Month -->
+{% if customers_by_month %}
+<div class="card">
+  <div class="card-header fw-semibold">Customers Loaded by Month</div>
+  <div class="card-body">
+    <table class="table table-sm table-hover mb-0">
+      <thead>
+        <tr><th>Month</th><th>Customers</th></tr>
+      </thead>
+      <tbody>
+        {% for row in customers_by_month %}
+        <tr>
+          <td>{{ row.month }}</td>
+          <td>{{ row.cnt }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

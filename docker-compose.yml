@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: transaction-postgres
+    environment:
+      POSTGRES_DB: tx_review
+      POSTGRES_USER: tx_user
+      POSTGRES_PASSWORD: tx_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks:
+      - app-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tx_user -d tx_review"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  webapp:
+    build:
+      context: .
+      dockerfile: dockerfile/Dockerfile
+    container_name: transaction-app
+    environment:
+      # App runtime: PostgreSQL
+      FLASK_ENV: development
+      FLASK_DEBUG: "1"
+      SECRET_KEY: dev-secret-key-change-in-production
+      # PostgreSQL connection settings
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: tx_review
+      POSTGRES_USER: tx_user
+      POSTGRES_PASSWORD: tx_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - app-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  app-net:
+    driver: bridge

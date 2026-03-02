@@ -1,0 +1,18 @@
+# Python cache and environments
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Virtual environments
+.venv/
+venv/
+
+# Node/PM2 artifacts (if any)
+node_modules/
+
+# Git and editor
+.git/
+*.swp
+.DS_Store
