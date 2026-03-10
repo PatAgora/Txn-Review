@@ -1,4 +1,4 @@
-import os, csv, io, json
+import os, csv, io, json, tempfile
 import time
 import stat
 from datetime import datetime, date, timedelta
@@ -33,9 +33,10 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.pool
 
-from flask import Flask, g, render_template, request, redirect, url_for, send_from_directory, flash, abort, session, Response
+from flask import Flask, g, render_template, request, redirect, url_for, send_from_directory, flash, abort, session, Response, jsonify
 
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from functools import wraps
 
 DB_HOST = os.getenv("POSTGRES_HOST", "localhost")
@@ -88,11 +89,12 @@ class DBWrapper:
                 raise
     
     def executemany(self, sql, seq_of_params):
-        """Execute SQL with multiple parameter sets."""
+        """Execute SQL with multiple parameter sets using execute_batch for bulk performance."""
         try:
             sql_pg = sql.replace('?', '%s')
             cur = self.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cur.executemany(sql_pg, seq_of_params)
+            # execute_batch sends multiple statements per network round-trip (2-5x faster)
+            psycopg2.extras.execute_batch(cur, sql_pg, list(seq_of_params), page_size=1000)
             return cur
         except psycopg2.Error as e:
             app.logger.error(f"Database error occurred: {type(e).__name__}", exc_info=True)
@@ -131,7 +133,7 @@ def _get_pool():
             if _db_pool is None:
                 _db_pool = psycopg2.pool.ThreadedConnectionPool(
                     minconn=4,
-                    maxconn=40,
+                    maxconn=80,
                     dsn=get_db_connection_string(),
                 )
     return _db_pool
@@ -239,12 +241,17 @@ app.config['SESSION_COOKIE_SECURE'] = not os.getenv('FLASK_DEBUG')  # HTTPS only
 app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent JavaScript access
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=30)  # Session timeout
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB upload limit (AGRA-001-1-11)
 
 # Security constants
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_DURATION_MINUTES = 15
 PASSWORD_MIN_LENGTH = 10
 COMMON_PASSWORDS = {'password', 'password123', 'admin123', '123456789', 'qwerty123', 'letmein123'}
+
+# Pre-computed dummy hash for constant-time login (AGRA-001-1-4 pen test remediation)
+# Used to equalise response times for valid vs invalid usernames
+_DUMMY_PASSWORD_HASH = generate_password_hash("dummy-constant-time-placeholder")
 
 
 # ---------- CSRF Protection ----------
@@ -255,6 +262,26 @@ def generate_csrf_token():
     return session['csrf_token']
 
 app.jinja_env.globals['csrf_token'] = generate_csrf_token
+
+@app.template_filter('uk_date')
+def _jinja_uk_date(val):
+    """Format a date/datetime for UK display. Shows time only when present."""
+    if not val:
+        return '-'
+    try:
+        if isinstance(val, datetime):
+            if val.hour == 0 and val.minute == 0 and val.second == 0:
+                return val.strftime('%d/%m/%Y')
+            return val.strftime('%d/%m/%Y %H:%M')
+        if isinstance(val, date):
+            return val.strftime('%d/%m/%Y')
+        s = str(val)
+        dt = datetime.fromisoformat(s) if 'T' in s or len(s) > 10 else datetime.strptime(s[:10], '%Y-%m-%d')
+        if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+            return dt.strftime('%d/%m/%Y')
+        return dt.strftime('%d/%m/%Y %H:%M')
+    except Exception:
+        return str(val)
 
 
 @app.before_request
@@ -378,6 +405,7 @@ def set_security_headers(response):
     response.headers['X-Permitted-Cross-Domain-Policies'] = 'none'
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
     response.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'credentialless'  # AGRA-001-1-14
     response.headers['X-XSS-Protection'] = '0'
 
     # Cache control — prevent caching of all dynamic pages
@@ -475,7 +503,7 @@ def verify_backup_code(user_id: int, code: str) -> bool:
     
     try:
         codes = json.loads(user['backup_codes'])
-    except:
+    except Exception:
         return False
     
     code_upper = code.upper().replace('-', '').replace(' ', '')
@@ -491,7 +519,7 @@ def verify_backup_code(user_id: int, code: str) -> bool:
 
 def is_2fa_required() -> bool:
     """Check if 2FA is enforced globally."""
-    return cfg_get('cfg_enforce_2fa', False, bool)
+    return cfg_get('cfg_enforce_2fa', True, bool)
 
 
 def user_has_2fa(user_id: int) -> bool:
@@ -517,7 +545,7 @@ def get_smtp_config():
             'use_oauth': cfg_get('cfg_smtp_use_oauth', False, bool),
             'tenant_id': cfg_get('cfg_smtp_tenant_id', '', str),
         }
-    except:
+    except Exception:
         return None
 
 
@@ -555,6 +583,180 @@ def get_oauth2_access_token(tenant_id: str, client_id: str, client_secret: str) 
         return None, str(ex)
 
 _email_executor = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=3)
+
+# --- Background scoring executor ---------------------------------------------------
+_scoring_executor = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=2)
+
+def _set_scoring_status(customer_id, status, msg=""):
+    """Persist scoring status to the scoring_jobs table (DB-backed, cross-worker safe)."""
+    import datetime as _dt
+    conn = _get_pool().getconn()
+    try:
+        conn.autocommit = False
+        cur = conn.cursor()
+        now = _dt.datetime.utcnow()
+        if status == "scoring":
+            cur.execute(
+                "UPDATE scoring_jobs SET message=%s, updated_at=%s "
+                "WHERE id = (SELECT id FROM scoring_jobs WHERE customer_id=%s AND status='scoring' "
+                "ORDER BY updated_at DESC LIMIT 1)",
+                (msg, now, customer_id)
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    "INSERT INTO scoring_jobs(customer_id, status, started_at, updated_at, message) "
+                    "VALUES(%s, %s, %s, %s, %s)",
+                    (customer_id, status, now, now, msg)
+                )
+        else:
+            cur.execute(
+                "UPDATE scoring_jobs SET status=%s, message=%s, updated_at=%s "
+                "WHERE customer_id=%s AND status='scoring'",
+                (status, msg, now, customer_id)
+            )
+        conn.commit()
+    except Exception as e:
+        app.logger.error(f"_set_scoring_status failed for {customer_id}/{status}: {e}", exc_info=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            _get_pool().putconn(conn)
+        except Exception:
+            try:
+                _get_pool().putconn(conn, close=True)
+            except Exception:
+                pass
+
+
+def _get_scoring_status(customer_id):
+    """Read scoring status from DB. Returns dict or None."""
+    try:
+        db = get_db()
+        row = db.execute(
+            "SELECT status, message AS msg, started_at "
+            "FROM scoring_jobs WHERE customer_id = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (customer_id,)
+        ).fetchone()
+        try:
+            db.execute(
+                "UPDATE scoring_jobs SET status='error', message='Processing timed out — worker may have restarted' "
+                "WHERE status = 'scoring' AND updated_at < CURRENT_TIMESTAMP - INTERVAL '10 minutes'"
+            )
+            db.execute(
+                "DELETE FROM scoring_jobs WHERE status != 'scoring' "
+                "AND updated_at < CURRENT_TIMESTAMP - INTERVAL '1 hour'"
+            )
+            db.commit()
+        except Exception:
+            pass
+        if row:
+            if row["status"] == "scoring":
+                row = db.execute(
+                    "SELECT status, message AS msg, started_at "
+                    "FROM scoring_jobs WHERE customer_id = ? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (customer_id,)
+                ).fetchone()
+            return {"status": row["status"], "msg": row["msg"] or "", "started": row["started_at"]}
+        return None
+    except Exception:
+        return None
+
+
+def _clear_scoring_status(customer_id):
+    """Delete completed/errored scoring_jobs rows for this customer."""
+    try:
+        db = get_db()
+        db.execute(
+            "DELETE FROM scoring_jobs WHERE customer_id = ? AND status != 'scoring'",
+            (customer_id,)
+        )
+        db.commit()
+    except Exception:
+        pass
+
+
+def _run_scoring_background(customer_id, purge_first=False):
+    """Run score_new_transactions() in a background thread with its own app context."""
+    try:
+        _set_scoring_status(customer_id, "scoring")
+        with app.app_context():
+            if purge_first:
+                db = get_db()
+                db.execute("DELETE FROM alerts WHERE customer_id = ?", (customer_id,))
+                db.execute(
+                    "DELETE FROM alerts WHERE txn_id IN "
+                    "(SELECT id FROM transactions WHERE customer_id = ?)",
+                    (customer_id,)
+                )
+                db.commit()
+            score_new_transactions(customer_id=customer_id)
+            refresh_customer_summary(customer_id)
+        _set_scoring_status(customer_id, "done", f"Scoring complete for {customer_id}")
+    except Exception as e:
+        app.logger.error(f"Background scoring failed for {customer_id}: {e}", exc_info=True)
+        _set_scoring_status(customer_id, "error", "Scoring failed — see server logs for details")
+
+
+def submit_scoring(customer_id, purge_first=False):
+    """Submit scoring to the background executor. Returns immediately."""
+    _scoring_executor.submit(_run_scoring_background, customer_id, purge_first)
+
+
+def _run_ingest_and_score_background(customer_id, tmp_path, stmt_id, original_filename,
+                                     account_name, user_id, username):
+    """Run file ingest + scoring in a background thread. Cleans up temp file when done."""
+    try:
+        _set_scoring_status(customer_id, "scoring", "Ingesting transactions…")
+        with app.app_context():
+            with open(tmp_path, "rb") as f:
+                f.filename = original_filename
+                n, date_from, date_to = ingest_transactions_csv_for_customer(
+                    f, customer_id, statement_id=stmt_id
+                )
+            db = get_db()
+            db.execute(
+                "UPDATE statements SET record_count=?, date_from=?, date_to=? WHERE id=?",
+                (n, date_from, date_to, stmt_id)
+            )
+            db.commit()
+            log_audit_event("TRANSACTION_UPLOAD", user_id, username,
+                            details=f"Uploaded {n} transactions for customer {customer_id} "
+                                    f"(account: {account_name or 'N/A'}, file: {original_filename})")
+            _set_scoring_status(customer_id, "scoring", "Scoring transactions…")
+            db.execute("DELETE FROM alerts WHERE customer_id = ?", (customer_id,))
+            db.execute(
+                "DELETE FROM alerts WHERE txn_id IN "
+                "(SELECT id FROM transactions WHERE customer_id = ?)",
+                (customer_id,)
+            )
+            db.commit()
+            score_new_transactions(customer_id=customer_id)
+            refresh_customer_summary(customer_id)
+        _set_scoring_status(customer_id, "done", f"Ingested {n} transactions and scoring complete")
+    except Exception as e:
+        app.logger.error(f"Background ingest+scoring failed for {customer_id}: {e}", exc_info=True)
+        _set_scoring_status(customer_id, "error", "Upload/scoring failed — see server logs for details")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def submit_ingest_and_score(customer_id, tmp_path, stmt_id, original_filename,
+                            account_name, user_id, username):
+    """Submit ingest+scoring to the background executor. Returns immediately."""
+    _scoring_executor.submit(
+        _run_ingest_and_score_background,
+        customer_id, tmp_path, stmt_id, original_filename,
+        account_name, user_id, username
+    )
+
 
 def _send_email_sync(config, to_email, msg_string):
     """Internal: send a pre-built email synchronously (runs in background thread)."""
@@ -752,7 +954,7 @@ CREATE TABLE IF NOT EXISTS customer_cash_limits(
 
 CREATE TABLE IF NOT EXISTS transactions(
   id TEXT PRIMARY KEY,
-  txn_date DATE NOT NULL,
+  txn_date TIMESTAMP NOT NULL,
   customer_id TEXT NOT NULL,
   direction TEXT CHECK(direction IN ('in','out')) NOT NULL,
   amount DOUBLE PRECISION NOT NULL,
@@ -784,6 +986,7 @@ CREATE TABLE IF NOT EXISTS alerts(
 
 CREATE INDEX IF NOT EXISTS idx_alerts_customer ON alerts(customer_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_txn_id ON alerts(txn_id);
 
 CREATE TABLE IF NOT EXISTS users(
   id BIGSERIAL PRIMARY KEY,
@@ -1074,27 +1277,27 @@ def ensure_users_table():
     if not _column_exists('users', 'totp_secret'):
         try:
             db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT;")
-        except:
+        except Exception:
             pass
     if not _column_exists('users', 'totp_enabled'):
         try:
             db.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0;")
-        except:
+        except Exception:
             pass
     if not _column_exists('users', 'backup_codes'):
         try:
             db.execute("ALTER TABLE users ADD COLUMN backup_codes TEXT;")
-        except:
+        except Exception:
             pass
     if not _column_exists('users', 'totp_verified'):
         try:
             db.execute("ALTER TABLE users ADD COLUMN totp_verified INTEGER DEFAULT 0;")
-        except:
+        except Exception:
             pass
     if not _column_exists('users', 'user_type'):
         try:
             db.execute("ALTER TABLE users ADD COLUMN user_type TEXT DEFAULT 'BAU';")
-        except:
+        except Exception:
             pass
     db.commit()
     
@@ -1172,15 +1375,46 @@ def ensure_statements_table():
         try:
             db.execute("ALTER TABLE statements ADD COLUMN account_name TEXT;")
             db.commit()
-        except:
+        except Exception:
             pass
     # Add statement_id to transactions if not exists
     if not _column_exists('transactions', 'statement_id'):
         try:
             db.execute("ALTER TABLE transactions ADD COLUMN statement_id INTEGER;")
             db.commit()
-        except:
+        except Exception:
             pass
+    # Add account_name to transactions if not exists
+    if not _column_exists('transactions', 'account_name'):
+        try:
+            db.execute("ALTER TABLE transactions ADD COLUMN account_name TEXT;")
+            db.commit()
+        except Exception:
+            db.rollback()
+    # Indexes for account filtering and scoring performance
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_tx_account_name ON transactions(customer_id, account_name);",
+        "CREATE INDEX IF NOT EXISTS idx_tx_customer_dir_date ON transactions(customer_id, direction, txn_date);",
+        "CREATE INDEX IF NOT EXISTS idx_tx_base_amount ON transactions(customer_id, base_amount);",
+    ]:
+        try:
+            db.execute(idx_sql)
+            db.commit()
+        except Exception:
+            db.rollback()
+    # Backfill account_name from statements for previously uploaded transactions
+    try:
+        db.execute("""
+            UPDATE transactions
+            SET account_name = s.account_name
+            FROM statements s
+            WHERE transactions.statement_id = s.id
+              AND transactions.account_name IS NULL
+              AND s.account_name IS NOT NULL
+        """)
+        db.commit()
+    except Exception:
+        db.rollback()
     # Add CBS-schema columns to transactions if not exists
     for cbs_col in ['transaction_type', 'instrument', 'originating_customer',
                      'originating_bank', 'beneficiary_customer', 'beneficiary_bank',
@@ -1190,7 +1424,7 @@ def ensure_statements_table():
             try:
                 db.execute(f"ALTER TABLE transactions ADD COLUMN {cbs_col} {col_type};")
                 db.commit()
-            except:
+            except Exception:
                 pass
     # Create ref_bank_country table if not exists
     db.execute("""
@@ -1203,6 +1437,160 @@ def ensure_statements_table():
     """)
     db.commit()
 
+def ensure_scoring_jobs_table():
+    """Create scoring_jobs table for cross-worker scoring status tracking."""
+    db = get_db()
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS scoring_jobs(
+            id BIGSERIAL PRIMARY KEY,
+            customer_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'scoring',
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            message TEXT
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_scoring_jobs_cust ON scoring_jobs(customer_id, updated_at DESC)")
+    db.commit()
+
+def ensure_customer_summaries_table():
+    """Create customer_summaries table for materialised dashboard metrics."""
+    db = get_db()
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS customer_summaries(
+            customer_id TEXT PRIMARY KEY,
+            total_tx INTEGER DEFAULT 0,
+            total_alerts INTEGER DEFAULT 0,
+            critical_alerts INTEGER DEFAULT 0,
+            total_in DOUBLE PRECISION DEFAULT 0,
+            total_out DOUBLE PRECISION DEFAULT 0,
+            cash_in DOUBLE PRECISION DEFAULT 0,
+            cash_out DOUBLE PRECISION DEFAULT 0,
+            high_risk_count INTEGER DEFAULT 0,
+            high_risk_total DOUBLE PRECISION DEFAULT 0,
+            avg_cash_in DOUBLE PRECISION,
+            avg_cash_out DOUBLE PRECISION,
+            avg_in DOUBLE PRECISION,
+            avg_out DOUBLE PRECISION,
+            max_in DOUBLE PRECISION,
+            max_out DOUBLE PRECISION,
+            overseas_in DOUBLE PRECISION DEFAULT 0,
+            overseas_out DOUBLE PRECISION DEFAULT 0,
+            total_value DOUBLE PRECISION DEFAULT 0,
+            high_risk_value DOUBLE PRECISION DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.commit()
+
+def refresh_customer_summary(customer_id):
+    """Recompute and upsert the materialised summary row for a customer."""
+    db = get_db()
+
+    row_a = db.execute("""
+        SELECT
+          COUNT(*) AS total_tx,
+          SUM(CASE WHEN direction='in' THEN base_amount ELSE 0 END) AS total_in,
+          SUM(CASE WHEN direction='out' THEN base_amount ELSE 0 END) AS total_out,
+          SUM(CASE WHEN direction='in' AND lower(COALESCE(channel,''))='cash' THEN base_amount ELSE 0 END) AS cash_in,
+          SUM(CASE WHEN direction='out' AND lower(COALESCE(channel,''))='cash' THEN base_amount ELSE 0 END) AS cash_out,
+          AVG(CASE WHEN direction='in' AND lower(COALESCE(channel,''))='cash' THEN base_amount END) AS avg_cash_in,
+          AVG(CASE WHEN direction='out' AND lower(COALESCE(channel,''))='cash' THEN base_amount END) AS avg_cash_out,
+          AVG(CASE WHEN direction='in' THEN base_amount END) AS avg_in,
+          AVG(CASE WHEN direction='out' THEN base_amount END) AS avg_out,
+          MAX(CASE WHEN direction='in' THEN base_amount END) AS max_in,
+          MAX(CASE WHEN direction='out' THEN base_amount END) AS max_out,
+          SUM(CASE WHEN COALESCE(country_iso2,'')<>'' AND UPPER(country_iso2)<>'GB' AND direction='in' THEN base_amount ELSE 0 END) AS overseas_in,
+          SUM(CASE WHEN COALESCE(country_iso2,'')<>'' AND UPPER(country_iso2)<>'GB' AND direction='out' THEN base_amount ELSE 0 END) AS overseas_out,
+          SUM(base_amount) AS total_value
+        FROM transactions WHERE customer_id = %s
+    """, (customer_id,)).fetchone()
+
+    row_b = db.execute("""
+        SELECT COUNT(*) AS total_alerts,
+               SUM(CASE WHEN severity='CRITICAL' THEN 1 ELSE 0 END) AS critical_alerts
+        FROM alerts WHERE customer_id = %s
+    """, (customer_id,)).fetchone()
+
+    row_c = db.execute("""
+        SELECT COUNT(*) AS high_risk_count, COALESCE(SUM(t.base_amount), 0) AS high_risk_total
+        FROM transactions t
+        JOIN ref_country_risk r ON r.iso2 = COALESCE(t.country_iso2, '')
+        WHERE t.customer_id = %s AND r.risk_level IN ('HIGH','HIGH_3RD','PROHIBITED')
+    """, (customer_id,)).fetchone()
+
+    db.execute("""
+        INSERT INTO customer_summaries(
+            customer_id, total_tx, total_alerts, critical_alerts,
+            total_in, total_out, cash_in, cash_out,
+            high_risk_count, high_risk_total,
+            avg_cash_in, avg_cash_out, avg_in, avg_out,
+            max_in, max_out, overseas_in, overseas_out,
+            total_value, high_risk_value, updated_at
+        ) VALUES (
+            %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT(customer_id) DO UPDATE SET
+            total_tx = EXCLUDED.total_tx,
+            total_alerts = EXCLUDED.total_alerts,
+            critical_alerts = EXCLUDED.critical_alerts,
+            total_in = EXCLUDED.total_in,
+            total_out = EXCLUDED.total_out,
+            cash_in = EXCLUDED.cash_in,
+            cash_out = EXCLUDED.cash_out,
+            high_risk_count = EXCLUDED.high_risk_count,
+            high_risk_total = EXCLUDED.high_risk_total,
+            avg_cash_in = EXCLUDED.avg_cash_in,
+            avg_cash_out = EXCLUDED.avg_cash_out,
+            avg_in = EXCLUDED.avg_in,
+            avg_out = EXCLUDED.avg_out,
+            max_in = EXCLUDED.max_in,
+            max_out = EXCLUDED.max_out,
+            overseas_in = EXCLUDED.overseas_in,
+            overseas_out = EXCLUDED.overseas_out,
+            total_value = EXCLUDED.total_value,
+            high_risk_value = EXCLUDED.high_risk_value,
+            updated_at = CURRENT_TIMESTAMP
+    """, (
+        customer_id,
+        int(row_a["total_tx"] or 0),
+        int(row_b["total_alerts"] or 0),
+        int(row_b["critical_alerts"] or 0),
+        float(row_a["total_in"] or 0),
+        float(row_a["total_out"] or 0),
+        float(row_a["cash_in"] or 0),
+        float(row_a["cash_out"] or 0),
+        int(row_c["high_risk_count"] or 0),
+        float(row_c["high_risk_total"] or 0),
+        float(row_a["avg_cash_in"]) if row_a["avg_cash_in"] is not None else None,
+        float(row_a["avg_cash_out"]) if row_a["avg_cash_out"] is not None else None,
+        float(row_a["avg_in"]) if row_a["avg_in"] is not None else None,
+        float(row_a["avg_out"]) if row_a["avg_out"] is not None else None,
+        float(row_a["max_in"]) if row_a["max_in"] is not None else None,
+        float(row_a["max_out"]) if row_a["max_out"] is not None else None,
+        float(row_a["overseas_in"] or 0),
+        float(row_a["overseas_out"] or 0),
+        float(row_a["total_value"] or 0),
+        float(row_c["high_risk_total"] or 0),
+    ))
+    db.commit()
+
+def _get_accounts_for_customer(customer_id):
+    """Return sorted list of distinct account_name values for a customer's transactions."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT DISTINCT account_name
+        FROM transactions
+        WHERE customer_id = ? AND account_name IS NOT NULL AND account_name != ''
+        ORDER BY account_name
+    """, (customer_id,)).fetchall()
+    return [r["account_name"] for r in rows]
+
 def get_current_user():
     """Return current user dict or None."""
     user_id = session.get("user_id")
@@ -1212,18 +1600,54 @@ def get_current_user():
     row = db.execute("SELECT * FROM users WHERE id=%s", (user_id,)).fetchone()
     return dict(row) if row else None
 
+def ensure_user_sessions_table():
+    """Create user_sessions table for concurrent session prevention (AGRA-001-1-10)."""
+    db = get_db()
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions(
+            id BIGSERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            session_token TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    db.execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id)")
+    db.commit()
+
 def login_required(f):
     """Decorator: require logged-in user and enforce 2FA if enabled globally."""
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Block pending-MFA users from accessing protected routes (AGRA-001-1-1)
+        if session.get("pending_user_id") and not session.get("user_id"):
+            flash("Please complete two-factor authentication first.")
+            return redirect(url_for("login"))
+
         if not session.get("user_id"):
             flash("Please log in to continue.")
             return redirect(url_for("login", next=request.url))
-        
+
+        # Validate session token against DB (AGRA-001-1-10 concurrent session prevention)
+        session_token = session.get("session_token")
+        if session_token:
+            try:
+                ensure_user_sessions_table()
+                db = get_db()
+                active = db.execute(
+                    "SELECT 1 FROM user_sessions WHERE user_id=%s AND session_token=%s",
+                    (session["user_id"], session_token)
+                ).fetchone()
+                if not active:
+                    session.clear()
+                    flash("Your session has been ended because you logged in elsewhere.")
+                    return redirect(url_for("login", next=request.url))
+            except Exception:
+                pass  # If table doesn't exist yet, allow through
+
         # Check if 2FA is enforced globally and user hasn't set it up
-        if cfg_get('cfg_enforce_2fa', False, bool):
+        if cfg_get('cfg_enforce_2fa', True, bool):
             # Skip check for 2FA setup pages to avoid redirect loop
-            if request.endpoint not in ('setup_2fa', 'manage_2fa', 'logout', 'static'):
+            if request.endpoint not in ('setup_2fa', 'manage_2fa', 'change_password', 'logout', 'static'):
                 db = get_db()
                 user = db.execute("SELECT totp_enabled, totp_verified FROM users WHERE id=?", 
                                   (session["user_id"],)).fetchone()
@@ -1269,6 +1693,7 @@ def ensure_ai_rationale_table():
           customer_id TEXT NOT NULL,
           period_from TEXT,
           period_to TEXT,
+          entity_type TEXT DEFAULT 'company',
           nature_of_business TEXT,
           est_income DOUBLE PRECISION,
           est_expenditure DOUBLE PRECISION,
@@ -1279,6 +1704,7 @@ def ensure_ai_rationale_table():
         );
     """)
     db.commit()
+    _ensure_ai_rationale_columns()
 
 def _load_rationale_row(customer_id: str, p_from: Optional[str], p_to: Optional[str]):
     db = get_db()
@@ -1293,33 +1719,50 @@ def _ensure_ai_rationale_columns():
         try:
             db.execute("ALTER TABLE ai_rationales ADD COLUMN rationale_text TEXT;")
             db.commit()
-        except:
-            pass
+        except Exception:
+            db.rollback()
+    if not _column_exists('ai_rationales', 'entity_type'):
+        try:
+            db.execute("ALTER TABLE ai_rationales ADD COLUMN entity_type TEXT DEFAULT 'company';")
+            db.commit()
+        except Exception:
+            db.rollback()
+    # Reviewer confirmation columns (AGRA pen test - audit trail for rationale sign-off)
+    for col, typedef in [('reviewer_confirmed', 'BOOLEAN DEFAULT FALSE'),
+                         ('reviewer_confirmed_by', 'TEXT'),
+                         ('reviewer_confirmed_at', 'TIMESTAMP'),
+                         ('reviewer_confirmed_type', 'TEXT')]:
+        if not _column_exists('ai_rationales', col):
+            try:
+                db.execute(f"ALTER TABLE ai_rationales ADD COLUMN {col} {typedef};")
+                db.commit()
+            except Exception:
+                db.rollback()
 
 def _upsert_rationale_row(customer_id: str, p_from: Optional[str], p_to: Optional[str],
+                          entity_type: Optional[str],
                           nature_of_business: Optional[str], est_income: Optional[float],
                           est_expenditure: Optional[float], rationale_text: str):
     """
     Insert or update a rationale row. Uses DELETE + INSERT pattern to handle NULL values
-    correctly (SQLite's ON CONFLICT doesn't work properly with NULLs in unique constraints).
+    correctly (PostgreSQL's ON CONFLICT doesn't work properly with NULLs in unique constraints).
     """
     db = get_db()
-    
-    # Delete any existing row with same customer_id and period bounds
-    # Use COALESCE to handle NULL comparisons properly
+
     db.execute("""
-        DELETE FROM ai_rationales 
-        WHERE customer_id = ? 
+        DELETE FROM ai_rationales
+        WHERE customer_id = ?
           AND COALESCE(period_from, '') = COALESCE(?, '')
           AND COALESCE(period_to, '') = COALESCE(?, '')
     """, (customer_id, p_from, p_to))
-    
-    # Insert the new row
+
     db.execute("""
-        INSERT INTO ai_rationales(customer_id, period_from, period_to, nature_of_business,
-                                  est_income, est_expenditure, rationale_text, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    """, (customer_id, p_from, p_to, nature_of_business, est_income, est_expenditure, rationale_text))
+        INSERT INTO ai_rationales(customer_id, period_from, period_to, entity_type,
+                                  nature_of_business, est_income, est_expenditure,
+                                  rationale_text, updated_at)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """, (customer_id, p_from, p_to, entity_type or 'company',
+          nature_of_business, est_income, est_expenditure, rationale_text))
     db.commit()
 
 def _format_date_pretty(date_str) -> str:
@@ -1674,6 +2117,9 @@ def init_db():
         import sys
         sys.stderr.write(msg)
         sys.stderr.flush()
+    # Ensure background scoring and summary tables exist
+    ensure_scoring_jobs_table()
+    ensure_customer_summaries_table()
 
 ALLOWED_AST_NODES = {
     ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
@@ -1843,8 +2289,8 @@ If none are relevant, return an empty array [].
     except Exception:
         return []
 
-def ai_question_bank():
-    # One or more questions per tag; keep simple, non-leading, regulator-friendly phrasing.
+def _default_question_bank():
+    """Built-in default question bank. One or more questions per tag; simple, non-leading, regulator-friendly."""
     return {
         "PROHIBITED_COUNTRY": [
             "Please explain the purpose for sending funds to this location.",
@@ -1865,11 +2311,11 @@ def ai_question_bank():
             "Please clarify the transaction narrative and provide supporting documentation (e.g., invoice/contract)."
         ],
         "EXPECTED_BREACH_OUT": [
-            "Your monthly account outgoings exceed your declared expectations. What is the reason for the increase?",
+            "Your monthly account outgoings exceed your average. What is the reason for the increase?",
             "Do we need to update your expected monthly outgoings moving forwards?"
         ],
         "EXPECTED_BREACH_IN": [
-            "Your monthly account incomings exceed your declared expectations. What is the reason for the increase?",
+            "Your monthly account incomings exceed your average. What is the reason for the increase?",
             "Do we need to update your expected monthly incomings moving forwards?"
         ],
         "STRUCTURING": [
@@ -1886,15 +2332,27 @@ def ai_question_bank():
         ],
     }
 
+def ai_question_bank():
+    """Return question bank, loading from DB config if available, falling back to defaults."""
+    raw = cfg_get("tpl_question_bank", None)
+    if raw:
+        try:
+            bank = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(bank, dict) and bank:
+                return bank
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return _default_question_bank()
+
 def _severity_rank(sev: str) -> int:
     return {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}.get((sev or "").upper(), 0)
 
-def build_ai_questions(customer_id, dfrom=None, dto=None, max_per_tag=5):
+def build_ai_questions(customer_id, dfrom=None, dto=None):
     """
     Returns:
-      base_questions: [{"tag","question","sources":[txn_ids...]}]  (ONE per tag)
+      base_questions: [{"tag","question","sources":[txn_ids...]}]  (ONE per tag, covering ALL alerts)
       fired_tags: list[str] in importance order
-      preview_alerts: compact list of exemplar alerts for prompt
+      preview_alerts: compact list of all alerts for prompt
     """
     tagged = fetch_customer_alerts_with_tags(customer_id, dfrom, dto)
     if not tagged:
@@ -1905,40 +2363,46 @@ def build_ai_questions(customer_id, dfrom=None, dto=None, max_per_tag=5):
     for r in tagged:
         per_tag[r["tag"]].append(r)
 
-    # order tags by worst severity → highest score → recency
+    # order tags by worst severity → highest score → tag specificity → recency
     sev_rank = {"CRITICAL":1,"HIGH":2,"MEDIUM":3,"LOW":4,"INFO":5}
+    tag_priority = {
+        "PROHIBITED_COUNTRY": 1, "HIGH_RISK_COUNTRY": 2,
+        "STRUCTURING": 3, "FLOW_THROUGH": 4,
+        "DORMANCY_REACTIVATION": 5, "HIGH_VELOCITY": 6,
+        "CASH_DAILY_BREACH": 7, "NLP_RISK": 8,
+        "HISTORICAL_DEVIATION": 9,
+        "EXPECTED_BREACH_IN": 10, "EXPECTED_BREACH_OUT": 10,
+    }
     fired = sorted(
         per_tag.keys(),
         key=lambda tg: (
             min(sev_rank.get(x["severity"], 5) for x in per_tag[tg]),
             -max(x["score"] or 0 for x in per_tag[tg]),
+            tag_priority.get(tg, 50),
             max(x["txn_date"] for x in per_tag[tg]),
         )
     )
 
     qbank = ai_question_bank()
     base = []
-    claimed_txn_ids = set()  # transactions already covered by a higher-priority question
 
-    # --- keep only ONE question per tag; deduplicate transactions across tags ---
+    # --- ONE question per tag; cap source alerts per tag ---
+    max_per_tag = 5
     for tg in fired:
         qs = qbank.get(tg, [])
         if not qs:
             continue
-        # Only include transactions not already claimed by a higher-priority tag
-        tag_txn_ids = [x["txn_id"] for x in per_tag[tg][:max_per_tag]
-                       if x["txn_id"] not in claimed_txn_ids]
+        tag_txn_ids = [x["txn_id"] for x in per_tag[tg][:max_per_tag]]
         if not tag_txn_ids:
-            continue  # all transactions already covered by earlier questions
+            continue
         q_text = qs[0].strip()
         base.append({
             "tag": tg,
             "question": q_text,
             "sources": tag_txn_ids
         })
-        claimed_txn_ids.update(tag_txn_ids)
 
-    # compact exemplar alerts for prompt context
+    # compact alerts for prompt context
     preview = []
     for tg in fired:
         for r in per_tag[tg][:max_per_tag]:
@@ -2129,7 +2593,7 @@ def get_builtin_rules():
             "score_impact": "25",
             "tags": "HISTORICAL_DEVIATION",
             "outcome": "Escalate",
-            "description": "Flag unusually large transactions compared to customer’s typical behaviour.",
+            "description": "Flag unusually large transactions compared to customer's typical behaviour.",
         },
         {
             "category": "Narrative Risk",
@@ -2282,7 +2746,7 @@ def ingest_transactions_csv(fobj):
     # --- helpers -------------------------------------------------------------
     def _excel_serial_to_date(n):
         # Excel's day 1 = 1899-12-31; but with the 1900-leap bug, pandas/Excel often use 1899-12-30
-        # We’ll use 1899-12-30 which matches most CSV exports.
+        # We'll use 1899-12-30 which matches most CSV exports.
         origin = date(1899, 12, 30)
         try:
             n = int(float(n))
@@ -2357,7 +2821,7 @@ def ingest_transactions_csv(fobj):
     df["txn_date"] = df["txn_date"].apply(_coerce_date)
     bad_dates = df["txn_date"].isna().sum()
     if bad_dates:
-        # Drop rows with unparseable txn_date; we’ll report how many were skipped
+        # Drop rows with unparseable txn_date; we'll report how many were skipped
         df = df[df["txn_date"].notna()]
 
     # --- normalize text-ish fields ------------------------------------------
@@ -2426,11 +2890,10 @@ def ingest_transactions_csv(fobj):
         n_inserted += 1
 
     db.commit()
-    score_new_transactions()
 
-    # Return count; the UI already flashes “Loaded N transactions”
+    # Return count; the UI already flashes "Loaded N transactions"
     # If you want to surface skipped rows, you can also flash here, but
-    # we’ll just print to console to avoid changing routes:
+    # we'll just print to console to avoid changing routes:
     if bad_dates:
         print(f"[ingest_transactions_csv] Skipped {bad_dates} row(s) with invalid txn_date.")
 
@@ -2479,14 +2942,17 @@ def lookup_bank_country(bank_name):
     return row["country_iso2"] if row else None
 
 
-def ingest_transactions_csv_for_customer(fobj, expected_customer_id, statement_id=None):
+def ingest_transactions_csv_for_customer(fobj, expected_customer_id, statement_id=None, account_name=None):
     """
     Ingest transactions for a specific customer only.
     Auto-detects CBS vs standard CSV format based on column headers.
+    Streams rows to keep memory flat regardless of file size.
     Returns (n_inserted, date_from, date_to).
     """
-    import pandas as pd
     from datetime import datetime, timedelta, date as date_type
+    import dateutil.parser as _dtparser
+
+    BATCH_SIZE = 500
 
     # --- helpers -------------------------------------------------------------
     def _excel_serial_to_date(n):
@@ -2499,15 +2965,28 @@ def ingest_transactions_csv_for_customer(fobj, expected_customer_id, statement_i
         except Exception:
             return None
 
+    # Formats with time component first, then date-only formats
     COMMON_FORMATS = [
         "%d/%m/%Y, %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M",
         "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y",
         "%d-%m-%Y", "%Y/%m/%d",
     ]
 
     def _coerce_date(val):
+        """Coerce a value to a datetime. Preserves time when present; defaults to midnight (00:00:00) when only a date is provided."""
         if val is None:
             return None
+        if isinstance(val, datetime):
+            return val
+        if isinstance(val, date_type):
+            return datetime(val.year, val.month, val.day)
         s = str(val).strip()
         if s == "" or s.lower() in ("nan", "none", "null"):
             return None
@@ -2515,18 +2994,17 @@ def ingest_transactions_csv_for_customer(fobj, expected_customer_id, statement_i
             if isinstance(val, (int, float)) or s.replace(".", "", 1).isdigit():
                 d = _excel_serial_to_date(val)
                 if d:
-                    return d
+                    return datetime(d.year, d.month, d.day)
         except Exception:
             pass
         for fmt in COMMON_FORMATS:
             try:
-                return datetime.strptime(s, fmt).date()
+                return datetime.strptime(s, fmt)
             except Exception:
                 pass
         try:
-            d = pd.to_datetime(s, dayfirst=True, errors="coerce")
-            if pd.notna(d):
-                return d.date()
+            d = _dtparser.parse(s, dayfirst=True)
+            return d if isinstance(d, datetime) else datetime(d.year, d.month, d.day)
         except Exception:
             pass
         return None
@@ -2541,162 +3019,237 @@ def ingest_transactions_csv_for_customer(fobj, expected_customer_id, statement_i
         s = s.lstrip("'").strip()
         return s if s else None
 
-    # --- load & detect format ------------------------------------------------
-    fname = getattr(fobj, 'filename', '') or ''
-    ext = os.path.splitext(fname)[1].lower()
-    if ext in ('.xlsx', '.xls'):
-        df = pd.read_excel(fobj, engine='openpyxl' if ext == '.xlsx' else None)
-    else:
-        df = pd.read_csv(fobj)
-    cols = set(map(str, df.columns))
+    def _safe_float(val, default=0.0):
+        if val is None:
+            return default
+        try:
+            f = float(val)
+            return f if f == f else default  # NaN check
+        except (ValueError, TypeError):
+            return default
 
-    # Auto-detect CBS format by checking for CBS-specific column headers
+    def _norm_null(val):
+        """Normalize a cell value: strip whitespace, convert null-ish strings to None."""
+        if val is None:
+            return None
+        s = str(val).strip()
+        if s.lower() in ("", "nan", "none", "null"):
+            return None
+        return s
+
+    # --- open file & read headers (streaming) --------------------------------
+    fname = getattr(fobj, 'filename', '') or getattr(fobj, 'name', '') or ''
+    ext = os.path.splitext(fname)[1].lower()
+
     CBS_SIGNATURE = {"Transaction ID", "Transaction Date", "Debit/Credit", "Base Amount"}
+    DIRECTION_MAP = {"debit": "out", "credit": "in"}
+
+    INSERT_SQL = """INSERT INTO transactions
+       (id, txn_date, customer_id, direction, amount, currency, base_amount,
+        country_iso2, payer_sort_code, payee_sort_code, channel, narrative,
+        transaction_type, instrument, originating_customer, originating_bank,
+        beneficiary_customer, beneficiary_bank, posting_date,
+        counterparty_account_no, counterparty_bank_code, statement_id, account_name)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(id) DO UPDATE SET
+         txn_date=EXCLUDED.txn_date, customer_id=EXCLUDED.customer_id,
+         direction=EXCLUDED.direction, amount=EXCLUDED.amount,
+         currency=EXCLUDED.currency, base_amount=EXCLUDED.base_amount,
+         country_iso2=EXCLUDED.country_iso2, payer_sort_code=EXCLUDED.payer_sort_code,
+         payee_sort_code=EXCLUDED.payee_sort_code, channel=EXCLUDED.channel,
+         narrative=EXCLUDED.narrative, transaction_type=EXCLUDED.transaction_type,
+         instrument=EXCLUDED.instrument, originating_customer=EXCLUDED.originating_customer,
+         originating_bank=EXCLUDED.originating_bank, beneficiary_customer=EXCLUDED.beneficiary_customer,
+         beneficiary_bank=EXCLUDED.beneficiary_bank, posting_date=EXCLUDED.posting_date,
+         counterparty_account_no=EXCLUDED.counterparty_account_no,
+         counterparty_bank_code=EXCLUDED.counterparty_bank_code,
+         statement_id=EXCLUDED.statement_id,
+         account_name=EXCLUDED.account_name"""
+
+    # --- build row iterator + detect format ----------------------------------
+    if ext in ('.xlsx', '.xls'):
+        import openpyxl
+        wb = openpyxl.load_workbook(fobj, read_only=True, data_only=True)
+        ws = wb.active
+        row_iter = ws.iter_rows(values_only=True)
+        try:
+            headers = [str(c) if c is not None else "" for c in next(row_iter)]
+        except StopIteration:
+            wb.close()
+            raise ValueError("Empty file — no header row found.")
+        cols = set(headers)
+
+        def _rows():
+            for values in row_iter:
+                yield dict(zip(headers, values))
+            wb.close()
+    else:
+        # CSV — wrap binary handle in text mode if needed
+        if hasattr(fobj, 'mode') and 'b' in getattr(fobj, 'mode', ''):
+            import io as _io
+            text_fobj = _io.TextIOWrapper(fobj, encoding='utf-8-sig', errors='replace')
+        else:
+            text_fobj = fobj
+        reader = csv.DictReader(text_fobj)
+        if reader.fieldnames is None:
+            raise ValueError("Empty file — no header row found.")
+        cols = set(reader.fieldnames)
+
+        def _rows():
+            yield from reader
+
     is_cbs = CBS_SIGNATURE.issubset(cols)
 
-    if is_cbs:
-        # --- CBS format parsing ---
-        df["id"] = df["Transaction ID"].astype(str).str.strip()
-        df["txn_date"] = df["Transaction Date"].apply(_coerce_date)
-        df["customer_id"] = expected_customer_id
-
-        direction_map = {"debit": "out", "credit": "in"}
-        df["direction"] = df["Debit/Credit"].astype(str).str.strip().str.lower().map(direction_map)
-        df = df[df["direction"].notna()]
-
-        parsed_amounts = df["Base Amount"].apply(_parse_cbs_amount)
-        df["currency"] = parsed_amounts.apply(lambda x: x[0])
-        df["amount"] = parsed_amounts.apply(lambda x: x[1])
-        df["base_amount"] = df["amount"]
-
-        df["transaction_type"] = df["Transaction Type"].apply(_clean_text) if "Transaction Type" in cols else None
-        df["channel"] = df["Transaction Channel"].astype(str).str.strip().str.lower().replace({"nan": None, "none": None, "": None}) if "Transaction Channel" in cols else None
-        df["instrument"] = df["Instrument"].apply(_clean_text) if "Instrument" in cols else None
-        df["originating_customer"] = df["Originating Customer"].apply(_clean_text) if "Originating Customer" in cols else None
-        df["originating_bank"] = df["Originating Bank"].apply(_clean_text) if "Originating Bank" in cols else None
-        df["beneficiary_customer"] = df["Beneficiary Customer"].apply(_clean_text) if "Beneficiary Customer" in cols else None
-        df["beneficiary_bank"] = df["Beneficiary Bank"].apply(_clean_text) if "Beneficiary Bank" in cols else None
-        df["narrative"] = df["Description"].apply(_clean_text) if "Description" in cols else None
-        df["posting_date"] = df["Posting Date"].apply(_coerce_date) if "Posting Date" in cols else None
-        df["counterparty_account_no"] = df["Counterparty Account No"].astype(str).str.strip().replace({"nan": None, "none": None, "None": None, "": None}) if "Counterparty Account No" in cols else None
-        df["counterparty_bank_code"] = df["Counterparty Bank Code"].astype(str).str.strip().replace({"nan": None, "none": None, "None": None, "": None}) if "Counterparty Bank Code" in cols else None
-
-        def _infer_country(row):
-            if row["direction"] == "in" and row.get("originating_bank"):
-                return lookup_bank_country(row["originating_bank"])
-            elif row["direction"] == "out" and row.get("beneficiary_bank"):
-                return lookup_bank_country(row["beneficiary_bank"])
-            return None
-        df["country_iso2"] = df.apply(_infer_country, axis=1)
-        df["payer_sort_code"] = None
-        df["payee_sort_code"] = None
-    else:
-        # --- Standard format parsing ---
+    # Validate standard format columns up front
+    if not is_cbs:
         needed = {"id", "txn_date", "direction", "amount", "base_amount"}
         missing = needed - cols
         if missing:
             raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
 
-        df["customer_id"] = expected_customer_id
-        df["direction"] = df["direction"].astype(str).str.lower().str.strip()
-        df["currency"] = df.get("currency", "GBP").fillna("GBP").astype(str).str.strip()
+    # --- load bank→country map -----------------------------------------------
+    db = get_db()
+    bank_rows = db.execute("SELECT bank_name_pattern, country_iso2 FROM ref_bank_country").fetchall()
+    bank_map = {r["bank_name_pattern"].upper(): r["country_iso2"] for r in bank_rows if r["bank_name_pattern"]}
 
-        for col in ["country_iso2", "payer_sort_code", "payee_sort_code", "channel", "narrative"]:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.strip()
-                df[col] = df[col].replace({"": None, "nan": None, "None": None, "NULL": None})
-            else:
-                df[col] = None
+    # --- stream rows, transform, batch-insert --------------------------------
+    batch = []
+    n_inserted = 0
+    bad_dates = 0
+    date_min = None
+    date_max = None
 
-        df["country_iso2"] = df["country_iso2"].apply(lambda x: (x or "").upper() or None)
-        df["channel"] = df["channel"].apply(lambda x: (x or "").lower() or None)
+    for raw in _rows():
+        # --- Transform row into canonical fields ---
+        if is_cbs:
+            txn_id = str(raw.get("Transaction ID", "")).strip()
+            txn_date = _coerce_date(raw.get("Transaction Date"))
+            direction_raw = str(raw.get("Debit/Credit", "")).strip().lower()
+            direction = DIRECTION_MAP.get(direction_raw)
+            if not direction:
+                continue  # skip rows without valid direction
 
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
-        df["base_amount"] = pd.to_numeric(df["base_amount"], errors="coerce")
-        mask_amt_na = df["amount"].isna() & df["base_amount"].notna()
-        mask_base_na = df["base_amount"].isna() & df["amount"].notna()
-        df.loc[mask_amt_na, "amount"] = df.loc[mask_amt_na, "base_amount"]
-        df.loc[mask_base_na, "base_amount"] = df.loc[mask_base_na, "amount"]
-        df["amount"] = df["amount"].fillna(0.0)
-        df["base_amount"] = df["base_amount"].fillna(0.0)
+            currency, amount = _parse_cbs_amount(raw.get("Base Amount"))
+            base_amount = amount
 
-        # CBS columns default to None for standard format
-        for cbs_col in ["transaction_type", "instrument", "originating_customer",
-                         "originating_bank", "beneficiary_customer", "beneficiary_bank",
-                         "posting_date", "counterparty_account_no", "counterparty_bank_code"]:
-            df[cbs_col] = None
+            transaction_type = _clean_text(raw.get("Transaction Type")) if "Transaction Type" in cols else None
+            channel_val = _norm_null(raw.get("Transaction Channel"))
+            channel = channel_val.lower() if channel_val else None
+            instrument = _clean_text(raw.get("Instrument")) if "Instrument" in cols else None
+            originating_customer = _clean_text(raw.get("Originating Customer")) if "Originating Customer" in cols else None
+            originating_bank = _clean_text(raw.get("Originating Bank")) if "Originating Bank" in cols else None
+            beneficiary_customer = _clean_text(raw.get("Beneficiary Customer")) if "Beneficiary Customer" in cols else None
+            beneficiary_bank = _clean_text(raw.get("Beneficiary Bank")) if "Beneficiary Bank" in cols else None
+            narrative = _clean_text(raw.get("Description")) if "Description" in cols else None
+            posting_date = _coerce_date(raw.get("Posting Date")) if "Posting Date" in cols else None
+            counterparty_account_no = _norm_null(raw.get("Counterparty Account No")) if "Counterparty Account No" in cols else None
+            counterparty_bank_code = _norm_null(raw.get("Counterparty Bank Code")) if "Counterparty Bank Code" in cols else None
 
-    # --- common: date parsing & filtering ------------------------------------
-    if not is_cbs:
-        df["txn_date"] = df["txn_date"].apply(_coerce_date)
-    bad_dates = df["txn_date"].isna().sum()
-    if bad_dates:
-        df = df[df["txn_date"].notna()]
-    if len(df) == 0:
+            # Infer country from bank name
+            country_iso2 = None
+            if direction == "in" and originating_bank:
+                country_iso2 = bank_map.get(originating_bank.upper())
+            elif direction == "out" and beneficiary_bank:
+                country_iso2 = bank_map.get(beneficiary_bank.upper())
+
+            payer_sort_code = None
+            payee_sort_code = None
+        else:
+            # --- Standard format ---
+            txn_id = str(raw.get("id", "")).strip()
+            txn_date = _coerce_date(raw.get("txn_date"))
+            direction = str(raw.get("direction", "")).strip().lower()
+            if direction not in ("in", "out"):
+                continue
+
+            amount = _safe_float(raw.get("amount"))
+            base_amount = _safe_float(raw.get("base_amount"))
+            if amount == 0.0 and base_amount != 0.0:
+                amount = base_amount
+            elif base_amount == 0.0 and amount != 0.0:
+                base_amount = amount
+
+            currency_val = _norm_null(raw.get("currency"))
+            currency = currency_val.strip() if currency_val else "GBP"
+
+            country_raw = _norm_null(raw.get("country_iso2"))
+            country_iso2 = country_raw.upper() if country_raw else None
+            payer_sort_code = _norm_null(raw.get("payer_sort_code"))
+            payee_sort_code = _norm_null(raw.get("payee_sort_code"))
+            channel_val = _norm_null(raw.get("channel"))
+            channel = channel_val.lower() if channel_val else None
+            narrative = _norm_null(raw.get("narrative"))
+
+            transaction_type = None
+            instrument = None
+            originating_customer = None
+            originating_bank = None
+            beneficiary_customer = None
+            beneficiary_bank = None
+            posting_date = None
+            counterparty_account_no = None
+            counterparty_bank_code = None
+
+        # --- Common: validate date ---
+        if txn_date is None:
+            bad_dates += 1
+            continue
+
+        # Track date range
+        if date_min is None or txn_date < date_min:
+            date_min = txn_date
+        if date_max is None or txn_date > date_max:
+            date_max = txn_date
+
+        # Build tuple for INSERT
+        batch.append((
+            txn_id,
+            str(txn_date),
+            expected_customer_id,
+            direction,
+            float(amount),
+            currency,
+            float(base_amount),
+            country_iso2,
+            payer_sort_code,
+            payee_sort_code,
+            channel,
+            narrative,
+            transaction_type,
+            instrument,
+            originating_customer,
+            originating_bank,
+            beneficiary_customer,
+            beneficiary_bank,
+            str(posting_date) if posting_date else None,
+            counterparty_account_no,
+            counterparty_bank_code,
+            statement_id,
+            account_name or None,
+        ))
+
+        # Flush batch
+        if len(batch) >= BATCH_SIZE:
+            db.executemany(INSERT_SQL, batch)
+            n_inserted += len(batch)
+            batch.clear()
+
+    # Flush remaining rows
+    if batch:
+        db.executemany(INSERT_SQL, batch)
+        n_inserted += len(batch)
+        batch.clear()
+
+    if n_inserted == 0:
         raise ValueError("No valid transactions found in the file.")
 
-    date_from = str(df["txn_date"].min())
-    date_to = str(df["txn_date"].max())
-
-    # --- insert (bulk for performance) ---------------------------------------
-    recs = df.to_dict(orient="records")
-    db = get_db()
-
-    batch_data = [
-        (
-            str(r["id"]),
-            str(r["txn_date"]),
-            str(r["customer_id"]),
-            str(r["direction"]),
-            float(r["amount"]),
-            str(r.get("currency", "GBP")),
-            float(r["base_amount"]),
-            (str(r["country_iso2"]) if r.get("country_iso2") else None),
-            (str(r["payer_sort_code"]) if r.get("payer_sort_code") else None),
-            (str(r["payee_sort_code"]) if r.get("payee_sort_code") else None),
-            (str(r["channel"]) if r.get("channel") else None),
-            (str(r["narrative"]) if r.get("narrative") else None),
-            r.get("transaction_type"),
-            r.get("instrument"),
-            r.get("originating_customer"),
-            r.get("originating_bank"),
-            r.get("beneficiary_customer"),
-            r.get("beneficiary_bank"),
-            str(r["posting_date"]) if r.get("posting_date") else None,
-            r.get("counterparty_account_no"),
-            r.get("counterparty_bank_code"),
-            statement_id,
-        )
-        for r in recs
-    ]
-
-    db.executemany(
-        """INSERT INTO transactions
-           (id, txn_date, customer_id, direction, amount, currency, base_amount,
-            country_iso2, payer_sort_code, payee_sort_code, channel, narrative,
-            transaction_type, instrument, originating_customer, originating_bank,
-            beneficiary_customer, beneficiary_bank, posting_date,
-            counterparty_account_no, counterparty_bank_code, statement_id)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(id) DO UPDATE SET
-             txn_date=EXCLUDED.txn_date, customer_id=EXCLUDED.customer_id,
-             direction=EXCLUDED.direction, amount=EXCLUDED.amount,
-             currency=EXCLUDED.currency, base_amount=EXCLUDED.base_amount,
-             country_iso2=EXCLUDED.country_iso2, payer_sort_code=EXCLUDED.payer_sort_code,
-             payee_sort_code=EXCLUDED.payee_sort_code, channel=EXCLUDED.channel,
-             narrative=EXCLUDED.narrative, transaction_type=EXCLUDED.transaction_type,
-             instrument=EXCLUDED.instrument, originating_customer=EXCLUDED.originating_customer,
-             originating_bank=EXCLUDED.originating_bank, beneficiary_customer=EXCLUDED.beneficiary_customer,
-             beneficiary_bank=EXCLUDED.beneficiary_bank, posting_date=EXCLUDED.posting_date,
-             counterparty_account_no=EXCLUDED.counterparty_account_no,
-             counterparty_bank_code=EXCLUDED.counterparty_bank_code,
-             statement_id=EXCLUDED.statement_id""",
-        batch_data
-    )
-    n_inserted = len(batch_data)
-
     db.commit()
-    score_new_transactions()
+
+    date_from = str(date_min) if date_min else None
+    date_to = str(date_max) if date_max else None
+
+    if bad_dates:
+        print(f"[ingest_transactions_csv_for_customer] Skipped {bad_dates} row(s) with invalid txn_date.")
 
     return n_inserted, date_from, date_to
 
@@ -2733,7 +3286,7 @@ def builtin_rules_catalog():
             "impact": "+25",
             "tags": "HISTORICAL_DEVIATION",
             "outcome": "Escalate",
-            "description": "Flag unusually large transactions compared to customer’s typical behaviour.",
+            "description": "Flag unusually large transactions compared to customer's typical behaviour.",
             "params": [ {"key":"cfg_median_multiplier","label":"Multiplier","suffix":"×"} ],
             "requires": "Historical median available",
         },
@@ -2900,7 +3453,7 @@ def ensure_ai_tables():
     if not _column_exists('ai_answers', 'sources'):
         try:
             db.execute("ALTER TABLE ai_answers ADD COLUMN sources TEXT;")
-        except:
+        except Exception:
             pass
     for col_name, col_type in [
         ('period_from', 'TEXT'),
@@ -2912,17 +3465,28 @@ def ensure_ai_tables():
         if not _column_exists('ai_cases', col_name):
             try:
                 db.execute(f"ALTER TABLE ai_cases ADD COLUMN {col_name} {col_type};")
-            except:
+            except Exception:
                 pass
     if not _column_exists('ai_cases', 'rationale_text'):
         try:
             db.execute("ALTER TABLE ai_cases ADD COLUMN rationale_text TEXT;")
-        except:
+        except Exception:
             pass
     if not _column_exists('ai_cases', 'rationale_generated_at'):
         try:
             db.execute("ALTER TABLE ai_cases ADD COLUMN rationale_generated_at TEXT;")
-        except:
+        except Exception:
+            pass
+    # "Not Required" support on ai_answers
+    if not _column_exists('ai_answers', 'not_required'):
+        try:
+            db.execute("ALTER TABLE ai_answers ADD COLUMN not_required BOOLEAN DEFAULT FALSE;")
+        except Exception:
+            pass
+    if not _column_exists('ai_answers', 'not_required_rationale'):
+        try:
+            db.execute("ALTER TABLE ai_answers ADD COLUMN not_required_rationale TEXT;")
+        except Exception:
             pass
     db.commit()
 
@@ -3078,73 +3642,137 @@ def risky_terms_enabled():
     items = cfg_get("cfg_risky_terms2", [], list)
     return [i["term"] for i in items if isinstance(i, dict) and i.get("enabled")]
 
-def score_new_transactions():
+def score_new_transactions(customer_id=None):
     db = get_db()
     country_map = get_country_map()
 
-    # Params
-    high_risk_min_amount = cfg_get("cfg_high_risk_min_amount", 0.0, float)
-    median_mult = cfg_get("cfg_median_multiplier", 3.0, float)
-    exp_out_factor = cfg_get("cfg_expected_out_factor", 1.2, float)
-    exp_in_factor  = cfg_get("cfg_expected_in_factor", 1.2, float)
-    exp_min_months = cfg_get("cfg_expected_min_months", 3, int)
-    enabled_terms  = risky_terms_enabled()  # NEW: only enabled
-    sev_crit = cfg_get("cfg_sev_critical", 90, int)
-    sev_high = cfg_get("cfg_sev_high", 70, int)
-    sev_med  = cfg_get("cfg_sev_medium", 50, int)
-    sev_low  = cfg_get("cfg_sev_low", 30, int)
+    # Bulk-fetch ALL config values in one query (avoids ~30 individual DB queries)
+    ensure_config_kv_table()
+    _all_cfg = {}
+    try:
+        _cfg_rows = db.execute("SELECT key, value FROM config_kv").fetchall()
+        _all_cfg = {r["key"]: r["value"] for r in _cfg_rows}
+    except Exception:
+        pass
 
-    # Toggles
+    def _cfg(key, default, cast=float):
+        raw = _all_cfg.get(key)
+        if raw is None:
+            return default
+        try:
+            if cast is float: return float(raw)
+            if cast is int:   return int(float(raw))
+            return raw
+        except Exception:
+            return default
+
+    def _cfg_bool(key, default=True):
+        raw = _all_cfg.get(key)
+        if raw is None:
+            return default
+        return str(raw).lower() in ("1", "true", "yes", "on")
+
+    # Params (all from cache, zero DB queries)
+    high_risk_min_amount = _cfg("cfg_high_risk_min_amount", 0.0)
+    median_mult = _cfg("cfg_median_multiplier", 3.0)
+    exp_out_factor = _cfg("cfg_expected_out_factor", 1.2)
+    exp_in_factor  = _cfg("cfg_expected_in_factor", 1.2)
+    exp_min_months = _cfg("cfg_expected_min_months", 3, int)
+    sev_crit = _cfg("cfg_sev_critical", 90, int)
+    sev_high = _cfg("cfg_sev_high", 70, int)
+    sev_med  = _cfg("cfg_sev_medium", 50, int)
+    sev_low  = _cfg("cfg_sev_low", 30, int)
+
+    # Risky terms (parse from cached value)
+    enabled_terms = []
+    try:
+        raw_terms = _all_cfg.get("cfg_risky_terms2")
+        if raw_terms:
+            terms_list = json.loads(raw_terms) if isinstance(raw_terms, str) else raw_terms
+            enabled_terms = [t["term"] for t in terms_list if t.get("enabled", True)]
+    except Exception:
+        pass
+
+    # Pre-compile NLP terms into single regex for O(1) matching per narrative
+    import re as _re
+    _nlp_pattern = None
+    if enabled_terms:
+        escaped = [_re.escape(t) for t in enabled_terms]
+        _nlp_pattern = _re.compile('|'.join(escaped), _re.IGNORECASE)
+
+    # Toggles (all from cache)
     on = {
-        "prohibited_country": cfg_get_bool("cfg_rule_enabled_prohibited_country", True),
-        "high_risk_corridor": cfg_get_bool("cfg_rule_enabled_high_risk_corridor", True),
-        "median_outlier": cfg_get_bool("cfg_rule_enabled_median_outlier", True),
-        "nlp_risky_terms": cfg_get_bool("cfg_rule_enabled_nlp_risky_terms", True),
-        "expected_out": cfg_get_bool("cfg_rule_enabled_expected_out", True),
-        "expected_in": cfg_get_bool("cfg_rule_enabled_expected_in", True),
-        "cash_daily_breach": cfg_get_bool("cfg_rule_enabled_cash_daily_breach", True),
-        "severity_mapping": cfg_get_bool("cfg_rule_enabled_severity_mapping", True),
-        "structuring": cfg_get_bool("cfg_rule_enabled_structuring", True),
-        "flowthrough": cfg_get_bool("cfg_rule_enabled_flowthrough", True),
-        "dormancy": cfg_get_bool("cfg_rule_enabled_dormancy", True),
-        "velocity": cfg_get_bool("cfg_rule_enabled_velocity", True),
+        "prohibited_country": _cfg_bool("cfg_rule_enabled_prohibited_country", True),
+        "high_risk_corridor": _cfg_bool("cfg_rule_enabled_high_risk_corridor", True),
+        "median_outlier": _cfg_bool("cfg_rule_enabled_median_outlier", True),
+        "nlp_risky_terms": _cfg_bool("cfg_rule_enabled_nlp_risky_terms", True),
+        "expected_out": _cfg_bool("cfg_rule_enabled_expected_out", True),
+        "expected_in": _cfg_bool("cfg_rule_enabled_expected_in", True),
+        "cash_daily_breach": _cfg_bool("cfg_rule_enabled_cash_daily_breach", True),
+        "severity_mapping": _cfg_bool("cfg_rule_enabled_severity_mapping", True),
+        "structuring": _cfg_bool("cfg_rule_enabled_structuring", True),
+        "flowthrough": _cfg_bool("cfg_rule_enabled_flowthrough", True),
+        "dormancy": _cfg_bool("cfg_rule_enabled_dormancy", True),
+        "velocity": _cfg_bool("cfg_rule_enabled_velocity", True),
     }
 
-    # New rule parameters
-    structuring_threshold = cfg_get("cfg_structuring_threshold", 10000.0, float)
-    structuring_margin_pct = cfg_get("cfg_structuring_margin_pct", 15.0, float)
-    structuring_min_count = cfg_get("cfg_structuring_min_count", 2, int)
-    flowthrough_window_days = cfg_get("cfg_flowthrough_window_days", 3, int)
-    flowthrough_match_pct = cfg_get("cfg_flowthrough_match_pct", 80.0, float)
-    dormancy_inactive_days = cfg_get("cfg_dormancy_inactive_days", 90, int)
-    dormancy_reactivation_amount = cfg_get("cfg_dormancy_reactivation_amount", 5000.0, float)
-    velocity_window_hours = cfg_get("cfg_velocity_window_hours", 24, int)
-    velocity_min_count = cfg_get("cfg_velocity_min_count", 5, int)
+    # Rule parameters (all from cache)
+    structuring_threshold = _cfg("cfg_structuring_threshold", 10000.0)
+    structuring_margin_pct = _cfg("cfg_structuring_margin_pct", 15.0)
+    structuring_min_count = _cfg("cfg_structuring_min_count", 2, int)
+    flowthrough_window_days = _cfg("cfg_flowthrough_window_days", 3, int)
+    flowthrough_match_pct = _cfg("cfg_flowthrough_match_pct", 80.0)
+    dormancy_inactive_days = _cfg("cfg_dormancy_inactive_days", 90, int)
+    dormancy_reactivation_amount = _cfg("cfg_dormancy_reactivation_amount", 5000.0)
+    velocity_window_hours = _cfg("cfg_velocity_window_hours", 24, int)
+    velocity_min_count = _cfg("cfg_velocity_min_count", 5, int)
 
-    # Pre-aggregate: Medians via SQL (avoids loading entire table into Python)
-    median_rows = db.execute("""
+    # Identify which customers have unscored transactions (scope all queries to them)
+    from collections import defaultdict
+    if customer_id:
+        _unscored_custs = db.execute("""
+            SELECT DISTINCT t.customer_id FROM transactions t
+            LEFT JOIN alerts a ON a.txn_id = t.id
+            WHERE a.id IS NULL AND t.customer_id = ?
+        """, (customer_id,)).fetchall()
+    else:
+        _unscored_custs = db.execute("""
+            SELECT DISTINCT t.customer_id FROM transactions t
+            LEFT JOIN alerts a ON a.txn_id = t.id
+            WHERE a.id IS NULL
+        """).fetchall()
+    cust_ids = [r["customer_id"] for r in _unscored_custs]
+    if not cust_ids:
+        return  # Nothing to score
+
+    # Build SQL IN clause for scoping
+    cust_placeholders = ','.join(['?'] * len(cust_ids))
+    cust_filter = f"customer_id IN ({cust_placeholders})"
+
+    # Pre-aggregate: Medians via SQL (scoped to relevant customers)
+    median_rows = db.execute(f"""
         SELECT customer_id, direction,
                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY base_amount) AS med
         FROM transactions
+        WHERE {cust_filter}
         GROUP BY customer_id, direction
-    """).fetchall()
+    """, cust_ids).fetchall()
     cust_medians = {(r["customer_id"], r["direction"]): float(r["med"]) for r in median_rows}
 
     # Pre-aggregate: Monthly totals per customer/direction
-    monthly_rows = db.execute("""
+    monthly_rows = db.execute(f"""
         SELECT customer_id, direction,
                TO_CHAR(txn_date, 'YYYY-MM-01') AS mstart,
                SUM(base_amount) AS total
         FROM transactions
+        WHERE {cust_filter}
         GROUP BY customer_id, direction, TO_CHAR(txn_date, 'YYYY-MM-01')
-    """).fetchall()
+    """, cust_ids).fetchall()
     monthly_totals = {}
     for r in monthly_rows:
         monthly_totals[(r["customer_id"], r["direction"], r["mstart"])] = float(r["total"])
 
     # Pre-aggregate: Historical average monthly totals per customer/direction
-    # For each (customer, direction, month) → average of all OTHER months + count
-    from collections import defaultdict
     _cust_dir_months = defaultdict(dict)
     for (cid, dirn, mstart), total in monthly_totals.items():
         _cust_dir_months[(cid, dirn)][mstart] = total
@@ -3157,43 +3785,46 @@ def score_new_transactions():
             excl_avg = (total_all - mtotal) / excl_count if excl_count > 0 else 0.0
             hist_avg_cache[(cid, dirn, mstart)] = (excl_avg, excl_count)
 
-    # Pre-aggregate: Cash daily totals per customer/date
-    cash_daily_rows = db.execute("""
-        SELECT customer_id, txn_date, SUM(base_amount) AS total
-        FROM transactions
-        WHERE lower(COALESCE(channel,''))='cash'
-           OR POSITION('cash' IN lower(COALESCE(narrative,'')))>0
-        GROUP BY customer_id, txn_date
-    """).fetchall()
+    # Pre-aggregate: Cash daily totals (scoped)
     cash_daily_totals = {}
-    for r in cash_daily_rows:
-        cash_daily_totals[(r["customer_id"], str(r["txn_date"]))] = float(r["total"])
+    if on["cash_daily_breach"]:
+        cash_daily_rows = db.execute(f"""
+            SELECT customer_id, CAST(txn_date AS DATE) AS txn_day, SUM(base_amount) AS total
+            FROM transactions
+            WHERE ({cust_filter})
+              AND (lower(COALESCE(channel,''))='cash'
+                   OR POSITION('cash' IN lower(COALESCE(narrative,'')))>0)
+            GROUP BY customer_id, CAST(txn_date AS DATE)
+        """, cust_ids).fetchall()
+        for r in cash_daily_rows:
+            cash_daily_totals[(r["customer_id"], str(r["txn_day"]))] = float(r["total"])
 
-    # Pre-aggregate: Earliest transaction date per customer (for dormancy)
-    earliest_rows = db.execute("""
+    # Pre-aggregate: Earliest transaction date per customer (scoped)
+    earliest_rows = db.execute(f"""
         SELECT customer_id, MIN(txn_date) AS earliest
-        FROM transactions
+        FROM transactions WHERE {cust_filter}
         GROUP BY customer_id
-    """).fetchall()
+    """, cust_ids).fetchall()
     cust_earliest = {r["customer_id"]: r["earliest"] for r in earliest_rows}
 
-    # Pre-aggregate: Transaction counts per customer/date (for velocity)
-    velocity_rows = db.execute("""
-        SELECT customer_id, txn_date, COUNT(*) AS cnt
-        FROM transactions
-        GROUP BY customer_id, txn_date
-    """).fetchall()
+    # Pre-aggregate: Transaction counts per customer/date for velocity (scoped)
     txn_counts_by_date = {}
-    for r in velocity_rows:
-        key = (r["customer_id"], str(r["txn_date"]))
-        txn_counts_by_date[key] = int(r["cnt"])
+    if on["velocity"]:
+        velocity_rows = db.execute(f"""
+            SELECT customer_id, CAST(txn_date AS DATE) AS txn_day, COUNT(*) AS cnt
+            FROM transactions WHERE {cust_filter}
+            GROUP BY customer_id, CAST(txn_date AS DATE)
+        """, cust_ids).fetchall()
+        for r in velocity_rows:
+            txn_counts_by_date[(r["customer_id"], str(r["txn_day"]))] = int(r["cnt"])
 
-    # Pre-load months that already have an expected-breach alert (one-per-month dedup)
-    existing_breach_rows = db.execute("""
+    # Pre-load months that already have an expected-breach alert
+    _breach_cust_filter = ','.join(['?'] * len(cust_ids))
+    existing_breach_rows = db.execute(f"""
         SELECT a.customer_id, t.direction, TO_CHAR(t.txn_date, 'YYYY-MM-01') AS mstart, a.rule_tags
         FROM alerts a JOIN transactions t ON t.id = a.txn_id
-        WHERE a.rule_tags LIKE ?
-    """, ('%EXPECTED_BREACH%',)).fetchall()
+        WHERE a.customer_id IN ({_breach_cust_filter}) AND a.rule_tags LIKE ?
+    """, cust_ids + ['%EXPECTED_BREACH%']).fetchall()
     _breach_fired = set()
     for r in existing_breach_rows:
         tags_str = r["rule_tags"] or ""
@@ -3202,13 +3833,75 @@ def score_new_transactions():
         if "EXPECTED_BREACH_IN" in tags_str and r["direction"] == "in":
             _breach_fired.add((r["customer_id"], "in", r["mstart"]))
 
-    # Worklist
-    txns = db.execute("""
+    # Pre-aggregate: Structuring (scoped, skip if disabled)
+    _structuring_cache = {}
+    if on["structuring"] and structuring_threshold > 0:
+        s_lower = structuring_threshold * (1 - structuring_margin_pct / 100)
+        struct_rows = db.execute(f"""
+            SELECT customer_id, CAST(txn_date AS DATE) AS txn_day, COUNT(*) AS cnt
+            FROM transactions
+            WHERE ({cust_filter}) AND base_amount >= ? AND base_amount < ?
+            GROUP BY customer_id, CAST(txn_date AS DATE)
+        """, cust_ids + [s_lower, structuring_threshold]).fetchall()
+        _struct_daily = defaultdict(dict)
+        for r in struct_rows:
+            _struct_daily[r["customer_id"]][str(r["txn_day"])] = int(r["cnt"])
+        for cid, date_counts in _struct_daily.items():
+            for ds, cnt in date_counts.items():
+                d_ref = date.fromisoformat(ds) if isinstance(ds, str) else ds
+                rolling = 0
+                for offset in range(8):
+                    check = (d_ref - timedelta(days=offset)).isoformat()
+                    rolling += date_counts.get(check, 0)
+                _structuring_cache[(cid, ds)] = rolling
+
+    # Pre-aggregate: Dormancy — use DISTINCT dates only (scoped, skip if disabled)
+    _dormancy_cache = {}
+    if on["dormancy"]:
+        dorm_rows = db.execute(f"""
+            SELECT DISTINCT customer_id, CAST(txn_date AS DATE) AS txn_day
+            FROM transactions WHERE {cust_filter}
+            ORDER BY customer_id, txn_day
+        """, cust_ids).fetchall()
+        _cust_dates = defaultdict(list)
+        for r in dorm_rows:
+            v = r["txn_day"]
+            _cust_dates[r["customer_id"]].append(
+                v if isinstance(v, date) else date.fromisoformat(str(v)[:10]))
+        for cid, dates in _cust_dates.items():
+            sorted_dates = sorted(set(dates))
+            for i, d_val in enumerate(sorted_dates):
+                if i > 0:
+                    _dormancy_cache[(cid, d_val.isoformat())] = sorted_dates[i-1]
+
+    # Pre-aggregate: Flow-through — date-bucketed index (scoped, skip if disabled)
+    _flowthrough_by_date = defaultdict(lambda: defaultdict(list))
+    if on["flowthrough"]:
+        ft_rows = db.execute(f"""
+            SELECT id, customer_id, direction, CAST(txn_date AS DATE) AS txn_day, base_amount
+            FROM transactions WHERE {cust_filter}
+            ORDER BY customer_id, txn_day
+        """, cust_ids).fetchall()
+        for r in ft_rows:
+            d_val = r["txn_day"] if isinstance(r["txn_day"], date) else date.fromisoformat(str(r["txn_day"])[:10])
+            _flowthrough_by_date[r["customer_id"]][d_val].append({
+                "id": r["id"],
+                "direction": r["direction"],
+                "base_amount": float(r["base_amount"]),
+            })
+
+    # Pre-fetch config values used inside the loop (avoid per-txn DB queries)
+    cash_daily_limit = float(cfg_get("cfg_cash_daily_limit", 0.0, float))
+
+    # Worklist (scoped to customers with unscored transactions)
+    txns = db.execute(f"""
         SELECT t.* FROM transactions t
         LEFT JOIN alerts a ON a.txn_id = t.id
-        WHERE a.id IS NULL
+        WHERE a.id IS NULL AND t.{cust_filter}
         ORDER BY t.txn_date ASC
-    """).fetchall()
+    """, cust_ids).fetchall()
+
+    alert_batch = []
 
     for t in txns:
         reasons, tags, score = [], [], 0
@@ -3216,7 +3909,13 @@ def score_new_transactions():
         chan = (t["channel"] or "").lower()
         narrative = (t["narrative"] or "")
 
-        d = t["txn_date"] if isinstance(t["txn_date"], date) else date.fromisoformat(str(t["txn_date"]))
+        _td = t["txn_date"]
+        if isinstance(_td, datetime):
+            d = _td.date()
+        elif isinstance(_td, date):
+            d = _td
+        else:
+            d = date.fromisoformat(str(_td)[:10])
         month_start = d.replace(day=1).isoformat()
 
         # Use pre-aggregated monthly totals instead of per-txn queries
@@ -3242,7 +3941,6 @@ def score_new_transactions():
             score += int(c["score"])
 
         # Cash daily breach (GLOBAL)
-        cash_daily_limit = float(cfg_get("cfg_cash_daily_limit", 0.0, float))
         if on["cash_daily_breach"] and cash_daily_limit > 0 and (chan == "cash" or "cash" in narrative.lower()):
             # Use pre-aggregated cash daily totals
             d_total = cash_daily_totals.get((t["customer_id"], str(t["txn_date"])), 0.0)
@@ -3257,13 +3955,11 @@ def score_new_transactions():
             tags.append("HISTORICAL_DEVIATION")
             score += 25
 
-        # NLP risky terms (only enabled terms)
-        if on["nlp_risky_terms"] and enabled_terms:
-            low = narrative.lower()
-            if any(term.lower() in low for term in enabled_terms):
-                reasons.append("Narrative contains risky term(s)")
-                tags.append("NLP_RISK")
-                score += 10
+        # NLP risky terms (pre-compiled regex for O(1) matching)
+        if on["nlp_risky_terms"] and _nlp_pattern and _nlp_pattern.search(narrative):
+            reasons.append("Narrative contains risky term(s)")
+            tags.append("NLP_RISK")
+            score += 10
 
         # Expected breaches (dynamic baseline from historical averages, once per customer/month)
         _out_key = (t["customer_id"], "out", month_start)
@@ -3282,62 +3978,55 @@ def score_new_transactions():
                 score += 15
                 _breach_fired.add(_in_key)
 
-        # Structuring detection - transactions just below reporting threshold
+        # Structuring detection - transactions just below reporting threshold (pre-aggregated)
         if on["structuring"] and structuring_threshold > 0:
             lower_bound = structuring_threshold * (1 - structuring_margin_pct / 100)
             amt = float(t["base_amount"])
             if lower_bound <= amt < structuring_threshold:
-                # Count similar transactions in rolling 7-day window
-                window_start = (d - timedelta(days=7)).isoformat()
-                window_end = d.isoformat()
-                similar_count = db.execute(
-                    """SELECT COUNT(*) as cnt FROM transactions
-                       WHERE customer_id=? AND txn_date BETWEEN ? AND ?
-                       AND base_amount >= ? AND base_amount < ?""",
-                    (t["customer_id"], window_start, window_end, lower_bound, structuring_threshold)
-                ).fetchone()["cnt"]
+                similar_count = _structuring_cache.get((t["customer_id"], d.isoformat()), 0)
                 if similar_count >= structuring_min_count:
                     reasons.append(f"Potential structuring: {similar_count} transactions just below £{structuring_threshold:,.0f} threshold")
                     tags.append("STRUCTURING")
                     score += 30
 
-        # Flow-through detection - funds in then out within short window
+        # Flow-through detection - funds in then out within short window (date-bucketed)
         if on["flowthrough"]:
             amt = float(t["base_amount"])
-            window_start = (d - timedelta(days=flowthrough_window_days)).isoformat()
-            window_end = (d + timedelta(days=flowthrough_window_days)).isoformat()
             match_lower = amt * (flowthrough_match_pct / 100)
             match_upper = amt * (2 - flowthrough_match_pct / 100)
             opposite_dir = "out" if t["direction"] == "in" else "in"
-
-            matching_txn = db.execute(
-                """SELECT id, base_amount, txn_date FROM transactions
-                   WHERE customer_id=? AND direction=?
-                   AND txn_date BETWEEN ? AND ?
-                   AND base_amount BETWEEN ? AND ?
-                   AND id != ?
-                   LIMIT 1""",
-                (t["customer_id"], opposite_dir, window_start, window_end, match_lower, match_upper, t["id"])
-            ).fetchone()
+            matching_txn = None
+            cust_dates = _flowthrough_by_date.get(t["customer_id"])
+            if cust_dates:
+                for offset_d in range(flowthrough_window_days + 1):
+                    for sign in (1, -1):
+                        check_d = d + timedelta(days=offset_d * sign)
+                        for ft in cust_dates.get(check_d, []):
+                            if ft["id"] == t["id"]:
+                                continue
+                            if ft["direction"] != opposite_dir:
+                                continue
+                            if match_lower <= ft["base_amount"] <= match_upper:
+                                matching_txn = ft
+                                break
+                        if matching_txn:
+                            break
+                    if matching_txn:
+                        break
             if matching_txn:
                 reasons.append(f"Flow-through pattern: £{amt:,.2f} {t['direction']} matched by £{matching_txn['base_amount']:,.2f} {opposite_dir} within {flowthrough_window_days} days")
                 tags.append("FLOW_THROUGH")
                 score += 25
 
-        # Dormancy detection - sudden activity after period of inactivity
+        # Dormancy detection - sudden activity after period of inactivity (pre-aggregated)
         if on["dormancy"] and float(t["base_amount"]) >= dormancy_reactivation_amount:
             earliest = cust_earliest.get(t["customer_id"])
             if earliest:
                 earliest_d = earliest if isinstance(earliest, date) else date.fromisoformat(str(earliest))
                 dormancy_cutoff = d - timedelta(days=dormancy_inactive_days)
-                # Only check if customer had activity before the dormancy window
                 if earliest_d < dormancy_cutoff:
-                    recent_activity = db.execute(
-                        """SELECT COUNT(*) as cnt FROM transactions
-                           WHERE customer_id=? AND txn_date BETWEEN ? AND ?""",
-                        (t["customer_id"], dormancy_cutoff.isoformat(), (d - timedelta(days=1)).isoformat())
-                    ).fetchone()["cnt"]
-                    if recent_activity == 0:
+                    prev_date = _dormancy_cache.get((t["customer_id"], d.isoformat()))
+                    if prev_date and prev_date < dormancy_cutoff:
                         reasons.append(f"Dormancy reactivation: £{t['base_amount']:,.2f} after {dormancy_inactive_days}+ days of inactivity")
                         tags.append("DORMANCY_REACTIVATION")
                         score += 20
@@ -3366,12 +4055,20 @@ def score_new_transactions():
                 severity = "LOW"
 
         if reasons:
-            db.execute(
-                """INSERT INTO alerts(txn_id, customer_id, score, severity, reasons, rule_tags, config_version)
-                   VALUES(?,?,?,?,?,?, (SELECT MAX(id) FROM config_versions))""",
-                (t["id"], t["customer_id"], int(min(score,100)), severity,
-                 json.dumps(reasons), json.dumps(list(dict.fromkeys(tags))))
-            )
+            alert_batch.append((
+                t["id"], t["customer_id"], int(min(score, 100)), severity,
+                json.dumps(reasons), json.dumps(list(dict.fromkeys(tags)))
+            ))
+
+    # Bulk insert all alerts at once
+    if alert_batch:
+        config_ver = db.execute("SELECT MAX(id) AS v FROM config_versions").fetchone()
+        cv = config_ver["v"] if config_ver else None
+        db.executemany(
+            """INSERT INTO alerts(txn_id, customer_id, score, severity, reasons, rule_tags, config_version)
+               VALUES(?,?,?,?,?,?,?)""",
+            [(a[0], a[1], a[2], a[3], a[4], a[5], cv) for a in alert_batch]
+        )
     db.commit()
 
 # ---------- Routes ----------
@@ -3382,7 +4079,7 @@ def login():
     # Ensure DB and users table exist before any auth queries
     init_db()
     ensure_users_table()
-    if session.get("user_id") and not session.get("awaiting_2fa"):
+    if session.get("user_id") and not session.get("awaiting_2fa") and not session.get("awaiting_2fa_setup"):
         # Check if user must change password
         if session.get("must_change_password"):
             return redirect(url_for("change_password"))
@@ -3401,8 +4098,13 @@ def login():
         
         db = get_db()
         user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-        
-        if user and check_password_hash(user["password_hash"], password):
+
+        # Always run password hash check to prevent timing-based username
+        # enumeration (AGRA-001-1-4 pen test remediation)
+        pw_hash = user["password_hash"] if user else _DUMMY_PASSWORD_HASH
+        password_valid = check_password_hash(pw_hash, password)
+
+        if user and password_valid:
             # Reset failed attempts on successful login
             reset_failed_login(username)
             
@@ -3418,18 +4120,18 @@ def login():
                 session["pending_user_id"] = user["id"]
                 session["pending_username"] = user["username"]
                 session["awaiting_2fa"] = True
+                session["pending_2fa_started"] = datetime.now().isoformat()
                 log_audit_event("LOGIN_2FA_PENDING", user["id"], username, "Awaiting 2FA verification")
                 return redirect(url_for("verify_2fa"))
-            
-            # No 2FA - complete login
-            result = complete_login(user)
-            if result:
-                return result
-            # Validate and use safe redirect URL
-            next_url = request.args.get("next")
-            if next_url and is_safe_redirect_url(next_url):
-                return redirect(next_url)
-            return _default_landing()
+
+            # No 2FA — enter pending state for MFA setup (AGRA-001-1-1)
+            # Do NOT call complete_login() yet; session_token must wait until MFA is configured
+            session["pending_user_id"] = user["id"]
+            session["pending_username"] = user["username"]
+            session["awaiting_2fa_setup"] = True
+            session["pending_2fa_started"] = datetime.now().isoformat()
+            log_audit_event("LOGIN_2FA_SETUP_PENDING", user["id"], username, "Awaiting 2FA setup")
+            return redirect(url_for("setup_2fa"))
         else:
             # Record failed attempt
             record_failed_login(username)
@@ -3521,7 +4223,7 @@ def reset_password(token):
 
         db.execute("UPDATE users SET password_hash=%s, must_change_password=0 WHERE id=%s",
                    (generate_password_hash(new_pw), user["id"]))
-        db.execute("UPDATE password_reset_tokens SET used=1 WHERE id=%s", (row["id"],))
+        db.execute("UPDATE password_reset_tokens SET used=1 WHERE user_id=%s", (row["user_id"],))
         db.commit()
 
         log_audit_event("PASSWORD_RESET_COMPLETED", user["id"], user["username"])
@@ -3544,6 +4246,8 @@ def complete_login(user):
     session.pop("pending_user_id", None)
     session.pop("pending_username", None)
     session.pop("awaiting_2fa", None)
+    session.pop("awaiting_2fa_setup", None)
+    session.pop("pending_2fa_started", None)
     
     # Set session
     session.permanent = True
@@ -3552,10 +4256,24 @@ def complete_login(user):
     session["role"] = user["role"]
     session["user_type"] = user.get("user_type", "BAU")
     session["last_activity"] = datetime.now().isoformat()
-    
+
+    # Concurrent session prevention (AGRA-001-1-10 pen test remediation)
+    # Invalidate all prior sessions for this user, then store the new token
+    try:
+        ensure_user_sessions_table()
+        db = get_db()
+        db.execute("DELETE FROM user_sessions WHERE user_id=%s", (user["id"],))
+        session_token = secrets.token_urlsafe(32)
+        session["session_token"] = session_token
+        db.execute("INSERT INTO user_sessions(user_id, session_token) VALUES(%s, %s)",
+                   (user["id"], session_token))
+        db.commit()
+    except Exception:
+        db = get_db()  # re-acquire in case of error
+
     # Update last login timestamp
     db = get_db()
-    db.execute("UPDATE users SET last_login=? WHERE id=?", 
+    db.execute("UPDATE users SET last_login=? WHERE id=?",
                (datetime.now().isoformat(), user["id"]))
     db.commit()
     
@@ -3599,7 +4317,11 @@ def verify_2fa():
             verified = verify_totp(user["totp_secret"], code)
         
         if verified:
-            complete_login(user)
+            # Clear pending state before complete_login (it also clears, but be explicit)
+            session.pop("pending_2fa_started", None)
+            result = complete_login(user)
+            if result:
+                return result
             # Validate and use safe redirect URL
             next_url = request.args.get("next")
             if next_url and is_safe_redirect_url(next_url):
@@ -3668,62 +4390,88 @@ def change_password():
 
 
 @app.route("/setup-2fa", methods=["GET", "POST"])
-@login_required
 def setup_2fa():
-    """Setup 2FA for the current user."""
+    """Setup 2FA for the current user (or pending-MFA user during login)."""
+    # Determine user_id: either fully authenticated or in pending MFA-setup state
+    user_id = session.get("user_id") or session.get("pending_user_id")
+    is_pending = session.get("awaiting_2fa_setup", False)
+
+    if not user_id and not is_pending:
+        flash("Please log in to continue.")
+        return redirect(url_for("login"))
+
+    # If not pending (i.e. already authenticated), enforce login_required semantics
+    if not is_pending and not session.get("user_id"):
+        flash("Please log in to continue.")
+        return redirect(url_for("login"))
+
     db = get_db()
-    user = db.execute("SELECT * FROM users WHERE id=?", (session["user_id"],)).fetchone()
-    
+    user = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+
+    if not user:
+        session.clear()
+        return redirect(url_for("login"))
+
     # Check if already enabled
     try:
         if user["totp_enabled"] and user["totp_verified"]:
+            if is_pending:
+                # User already has 2FA (race condition / back-button) — just verify
+                return redirect(url_for("verify_2fa"))
             flash("Two-factor authentication is already enabled.")
             return redirect(url_for("manage_2fa"))
     except (KeyError, TypeError):
         pass
-    
+
     # Generate or retrieve secret
     try:
         secret = user["totp_secret"]
     except (KeyError, TypeError):
         secret = None
-    
+
     if not secret:
         secret = generate_totp_secret()
-        db.execute("UPDATE users SET totp_secret=? WHERE id=?", (secret, session["user_id"]))
+        db.execute("UPDATE users SET totp_secret=? WHERE id=?", (secret, user_id))
         db.commit()
-    
+
     if request.method == "POST":
         code = request.form.get("code", "").strip().replace(" ", "")
-        
+
         if verify_totp(secret, code):
             # Generate backup codes
             backup_codes = generate_backup_codes()
-            
+
             # Enable 2FA
             db.execute("""
-                UPDATE users SET 
-                    totp_enabled=1, 
-                    totp_verified=1, 
+                UPDATE users SET
+                    totp_enabled=1,
+                    totp_verified=1,
                     backup_codes=?
                 WHERE id=?
-            """, (json.dumps(backup_codes), session["user_id"]))
+            """, (json.dumps(backup_codes), user_id))
             db.commit()
-            
-            log_audit_event("2FA_ENABLED", session["user_id"], session["username"], "2FA setup completed")
-            
+
+            if is_pending:
+                # Complete the login now that MFA is set up (AGRA-001-1-1)
+                session.pop("pending_2fa_started", None)
+                session.pop("awaiting_2fa_setup", None)
+                complete_login(user)
+                log_audit_event("2FA_ENABLED", user["id"], user["username"], "2FA setup completed during login")
+            else:
+                log_audit_event("2FA_ENABLED", user_id, session.get("username"), "2FA setup completed")
+
             # Show backup codes
-            return render_template("2fa_backup_codes.html", 
-                                   backup_codes=backup_codes, 
+            return render_template("2fa_backup_codes.html",
+                                   backup_codes=backup_codes,
                                    show_success=True)
         else:
             flash("Invalid verification code. Please try again.")
-    
+
     # Generate QR code
     qr_code = get_totp_qr_code(user["username"], secret)
-    
-    return render_template("setup_2fa.html", 
-                           qr_code=qr_code, 
+
+    return render_template("setup_2fa.html",
+                           qr_code=qr_code,
                            secret=secret,
                            username=user["username"])
 
@@ -3797,6 +4545,16 @@ def manage_2fa():
 def logout():
     user_id = session.get("user_id")
     username = session.get("username")
+    # Remove session from DB (AGRA-001-1-10 concurrent session prevention)
+    session_token = session.get("session_token")
+    if user_id and session_token:
+        try:
+            db = get_db()
+            db.execute("DELETE FROM user_sessions WHERE user_id=%s AND session_token=%s",
+                       (user_id, session_token))
+            db.commit()
+        except Exception:
+            pass
     session.clear()
     if user_id:
         log_audit_event("LOGOUT", user_id, username)
@@ -3805,6 +4563,24 @@ def logout():
 
 
 # --- Session timeout check ---
+@app.before_request
+def check_pending_mfa_timeout():
+    """Expire pending MFA sessions after 5 minutes (AGRA-001-1-1)."""
+    if session.get("pending_user_id") and not session.get("user_id"):
+        started = session.get("pending_2fa_started")
+        if started:
+            try:
+                start_time = datetime.fromisoformat(started)
+                if datetime.now() - start_time > timedelta(minutes=5):
+                    pending_user = session.get("pending_username", "unknown")
+                    session.clear()
+                    log_audit_event("PENDING_MFA_TIMEOUT", None, pending_user, "Pending MFA session expired")
+                    flash("Your session has expired. Please log in again.")
+                    return redirect(url_for("login"))
+            except (ValueError, TypeError):
+                session.clear()
+                return redirect(url_for("login"))
+
 @app.before_request
 def check_session_timeout():
     """Check for session timeout on each request."""
@@ -3857,11 +4633,15 @@ def dashboard():
 
     # --- Normal (filtered) dashboard below ---
     period = request.args.get("period", "all")
+    account = request.args.get("account", "").strip()
     start, end = _period_bounds(period)
 
     # Predicates for transactions and alerts
     tx_where, tx_params = ["t.customer_id = ?"], [customer_id]
     a_where, a_params = ["a.customer_id = ?"], [customer_id]
+
+    if account:
+        tx_where.append("t.account_name = ?"); tx_params.append(account)
 
     if start and end:
         tx_where.append("t.txn_date BETWEEN ? AND ?"); tx_params += [start, end]
@@ -3870,10 +4650,116 @@ def dashboard():
     tx_pred = "WHERE " + " AND ".join(tx_where)
     a_pred  = "WHERE " + " AND ".join(a_where)
 
-    # KPIs
-    total_tx = db.execute(f"SELECT COUNT(*) c FROM transactions t {tx_pred}", tx_params).fetchone()["c"]
-    total_alerts = db.execute(f"SELECT COUNT(*) c FROM alerts a {a_pred}", a_params).fetchone()["c"]
-    critical = db.execute(f"SELECT COUNT(*) c FROM alerts a {a_pred} AND a.severity='CRITICAL'", a_params).fetchone()["c"]
+    # Alert predicates for queries that join transactions (need account filter)
+    at_where = list(a_where)
+    at_params = list(a_params)
+    if account:
+        at_where.append("t.account_name = ?"); at_params.append(account)
+    at_pred = "WHERE " + " AND ".join(at_where)
+
+    # Use materialised summary when viewing unfiltered (all time, no account filter)
+    _use_summary = (not start) and (not account)
+    _summary = None
+    if _use_summary:
+        try:
+            _summary = db.execute(
+                "SELECT * FROM customer_summaries WHERE customer_id = %s", (customer_id,)
+            ).fetchone()
+        except Exception:
+            _summary = None
+
+    if _summary:
+        total_tx = int(_summary["total_tx"] or 0)
+        total_alerts = int(_summary["total_alerts"] or 0)
+        critical = int(_summary["critical_alerts"] or 0)
+        total_in = float(_summary["total_in"] or 0)
+        total_out = float(_summary["total_out"] or 0)
+        total_value = total_in + total_out
+        cash_in = float(_summary["cash_in"] or 0)
+        cash_out = float(_summary["cash_out"] or 0)
+        high_risk_volume = int(_summary["high_risk_count"] or 0)
+        high_risk_total = float(_summary["high_risk_total"] or 0)
+        avg_cash_deposits = float(_summary["avg_cash_in"] or 0)
+        avg_cash_withdrawals = float(_summary["avg_cash_out"] or 0)
+        avg_in = float(_summary["avg_in"] or 0)
+        avg_out = float(_summary["avg_out"] or 0)
+        max_in = float(_summary["max_in"] or 0)
+        max_out = float(_summary["max_out"] or 0)
+        overseas_in = float(_summary["overseas_in"] or 0)
+        overseas_out = float(_summary["overseas_out"] or 0)
+        highrisk_value = float(_summary["high_risk_value"] or 0)
+        denom_total = total_value if total_value > 0 else float(_summary["total_value"] or 0)
+        highrisk_pct = (highrisk_value / denom_total * 100.0) if denom_total > 0 else 0.0
+    else:
+        # Fallback: live aggregate queries (used when filters active or no summary yet)
+        total_tx = db.execute(f"SELECT COUNT(*) c FROM transactions t {tx_pred}", tx_params).fetchone()["c"]
+        total_alerts = db.execute(f"SELECT COUNT(*) c FROM alerts a {a_pred}", a_params).fetchone()["c"]
+        critical = db.execute(f"SELECT COUNT(*) c FROM alerts a {a_pred} AND a.severity='CRITICAL'", a_params).fetchone()["c"]
+
+        sums = db.execute(f"""
+          SELECT
+            SUM(CASE WHEN t.direction='in'  THEN t.base_amount ELSE 0 END)  AS total_in,
+            SUM(CASE WHEN t.direction='out' THEN t.base_amount ELSE 0 END)  AS total_out
+          FROM transactions t {tx_pred}
+        """, tx_params).fetchone()
+        total_in  = float(sums["total_in"]  or 0)
+        total_out = float(sums["total_out"] or 0)
+        total_value = total_in + total_out
+
+        cash = db.execute(f"""
+          SELECT
+            SUM(CASE WHEN t.direction='in'
+                       AND lower(COALESCE(t.channel,''))='cash'
+                     THEN t.base_amount ELSE 0 END) AS cash_in,
+            SUM(CASE WHEN t.direction='out'
+                       AND lower(COALESCE(t.channel,''))='cash'
+                     THEN t.base_amount ELSE 0 END) AS cash_out
+          FROM transactions t {tx_pred}
+        """, tx_params).fetchone()
+        cash_in  = float(cash["cash_in"]  or 0)
+        cash_out = float(cash["cash_out"] or 0)
+
+        hr = db.execute(f"""
+          SELECT COUNT(*) AS cnt, SUM(t.base_amount) AS total
+          FROM transactions t
+          JOIN ref_country_risk r ON r.iso2 = COALESCE(t.country_iso2, '')
+          {tx_pred + (' AND ' if tx_pred else 'WHERE ')} r.risk_level IN ('HIGH','HIGH_3RD','PROHIBITED')
+        """, tx_params).fetchone()
+        high_risk_volume = int(hr["cnt"] or 0)
+        high_risk_total  = float(hr["total"] or 0)
+
+        m = db.execute(f"""
+          SELECT
+            AVG(CASE WHEN t.direction='in'  AND lower(COALESCE(t.channel,''))='cash' THEN t.base_amount END) AS avg_cash_in,
+            AVG(CASE WHEN t.direction='out' AND lower(COALESCE(t.channel,''))='cash' THEN t.base_amount END) AS avg_cash_out,
+            AVG(CASE WHEN t.direction='in'  THEN t.base_amount END) AS avg_in,
+            AVG(CASE WHEN t.direction='out' THEN t.base_amount END) AS avg_out,
+            MAX(CASE WHEN t.direction='in'  THEN t.base_amount END) AS max_in,
+            MAX(CASE WHEN t.direction='out' THEN t.base_amount END) AS max_out,
+            SUM(CASE WHEN COALESCE(t.country_iso2,'')<>'' AND UPPER(t.country_iso2)<>'GB' AND t.direction='in' THEN t.base_amount ELSE 0 END) AS overseas_in,
+            SUM(CASE WHEN COALESCE(t.country_iso2,'')<>'' AND UPPER(t.country_iso2)<>'GB' AND t.direction='out' THEN t.base_amount ELSE 0 END) AS overseas_out,
+            SUM(t.base_amount) AS total_value
+          FROM transactions t {tx_pred}
+        """, tx_params).fetchone()
+        avg_cash_deposits    = float(m["avg_cash_in"]  or 0.0)
+        avg_cash_withdrawals = float(m["avg_cash_out"] or 0.0)
+        avg_in               = float(m["avg_in"]       or 0.0)
+        avg_out              = float(m["avg_out"]      or 0.0)
+        max_in               = float(m["max_in"]       or 0.0)
+        max_out              = float(m["max_out"]      or 0.0)
+        overseas_in          = float(m["overseas_in"] or 0.0)
+        overseas_out         = float(m["overseas_out"] or 0.0)
+        total_val_from_query = float(m["total_value"]  or 0.0)
+        denom_total = total_value if total_value > 0 else total_val_from_query
+
+        hr_val_row = db.execute(f"""
+          SELECT SUM(t.base_amount) AS v
+          FROM transactions t
+          JOIN ref_country_risk r ON r.iso2 = COALESCE(t.country_iso2, '')
+          {tx_pred + (' AND ' if tx_pred else 'WHERE ')} r.risk_level IN ('HIGH','HIGH_3RD','PROHIBITED')
+        """, tx_params).fetchone()
+        highrisk_value = float(hr_val_row["v"] or 0.0)
+        highrisk_pct   = (highrisk_value / denom_total * 100.0) if denom_total > 0 else 0.0
 
     kpis = {
         "total_tx": total_tx,
@@ -3882,46 +4768,12 @@ def dashboard():
         "critical": critical,
     }
 
-    # Tiles: totals, cash in/out
-    sums = db.execute(f"""
-      SELECT
-        SUM(CASE WHEN t.direction='in'  THEN t.base_amount ELSE 0 END)  AS total_in,
-        SUM(CASE WHEN t.direction='out' THEN t.base_amount ELSE 0 END)  AS total_out
-      FROM transactions t {tx_pred}
-    """, tx_params).fetchone()
-    total_in  = float(sums["total_in"]  or 0)
-    total_out = float(sums["total_out"] or 0)
-    total_value = total_in + total_out
-
-    cash = db.execute(f"""
-      SELECT
-        SUM(CASE WHEN t.direction='in'
-                   AND lower(COALESCE(t.channel,''))='cash'
-                 THEN t.base_amount ELSE 0 END) AS cash_in,
-        SUM(CASE WHEN t.direction='out'
-                   AND lower(COALESCE(t.channel,''))='cash'
-                 THEN t.base_amount ELSE 0 END) AS cash_out
-      FROM transactions t {tx_pred}
-    """, tx_params).fetchone()
-    cash_in  = float(cash["cash_in"]  or 0)
-    cash_out = float(cash["cash_out"] or 0)
-
-    # High/High-3rd/Prohibited corridors — count AND total £
-    hr = db.execute(f"""
-      SELECT COUNT(*) AS cnt, SUM(t.base_amount) AS total
-      FROM transactions t
-      JOIN ref_country_risk r ON r.iso2 = COALESCE(t.country_iso2, '')
-      {tx_pred + (' AND ' if tx_pred else 'WHERE ')} r.risk_level IN ('HIGH','HIGH_3RD','PROHIBITED')
-    """, tx_params).fetchone()
-    high_risk_volume = int(hr["cnt"] or 0)
-    high_risk_total  = float(hr["total"] or 0)
-
     tiles = {
         "total_in": total_in,
         "total_out": total_out,
         "cash_in": cash_in,
         "cash_out": cash_out,
-        "high_risk_volume": high_risk_volume,  # (you can ignore in template if you don't want to show the count)
+        "high_risk_volume": high_risk_volume,
         "high_risk_total": high_risk_total,
     }
 
@@ -3932,7 +4784,6 @@ def dashboard():
           FROM alerts a
           JOIN transactions t ON t.id = a.txn_id
           WHERE t.customer_id = %s AND t.txn_date BETWEEN %s AND %s
-          GROUP BY to_char(t.txn_date, 'YYYY-MM-DD') ORDER BY d
         """
         aot_params = [customer_id, start, end]
     else:
@@ -3941,9 +4792,12 @@ def dashboard():
           FROM alerts a
           JOIN transactions t ON t.id = a.txn_id
           WHERE t.customer_id = %s
-          GROUP BY to_char(t.txn_date, 'YYYY-MM-DD') ORDER BY d
         """
         aot_params = [customer_id]
+    if account:
+        aot_sql += " AND t.account_name = %s"
+        aot_params.append(account)
+    aot_sql += " GROUP BY to_char(t.txn_date, 'YYYY-MM-DD') ORDER BY d"
     rows = db.execute(aot_sql, aot_params).fetchall()
     labels = [r["d"] for r in rows]
     values = [int(r["c"]) for r in rows]
@@ -3953,69 +4807,38 @@ def dashboard():
       SELECT t.country_iso2, COUNT(*) cnt
       FROM alerts a
       JOIN transactions t ON t.id = a.txn_id
-      {a_pred}
+      {at_pred}
       GROUP BY t.country_iso2
       ORDER BY cnt DESC
       LIMIT 10
-    """, a_params).fetchall()
+    """, at_params).fetchall()
     top_countries = [
         {"name": country_full_name(r["country_iso2"]), "cnt": int(r["cnt"] or 0)}
         for r in tc_rows
     ]
 
     # Monthly trend of money in/out with cash breakdown (ALL TIME for this customer)
-    trend_rows = db.execute("""
+    trend_where = "WHERE t.customer_id = ?"
+    trend_params = [customer_id]
+    if account:
+        trend_where += " AND t.account_name = ?"
+        trend_params.append(account)
+    trend_rows = db.execute(f"""
       SELECT to_char(t.txn_date, 'YYYY-MM') ym,
              SUM(CASE WHEN t.direction='in'  THEN t.base_amount ELSE 0 END) AS in_sum,
              SUM(CASE WHEN t.direction='out' THEN t.base_amount ELSE 0 END) AS out_sum,
              SUM(CASE WHEN t.direction='in'  AND LOWER(COALESCE(t.channel,''))='cash' THEN t.base_amount ELSE 0 END) AS cash_in_sum,
              SUM(CASE WHEN t.direction='out' AND LOWER(COALESCE(t.channel,''))='cash' THEN t.base_amount ELSE 0 END) AS cash_out_sum
       FROM transactions t
-      WHERE t.customer_id = ?
+      {trend_where}
       GROUP BY ym
       ORDER BY ym
-    """, [customer_id]).fetchall()
+    """, trend_params).fetchall()
     trend_labels = [r["ym"] for r in trend_rows]
     trend_in  = [float(r["in_sum"]  or 0) for r in trend_rows]
     trend_out = [float(r["out_sum"] or 0) for r in trend_rows]
     trend_cash_in = [float(r["cash_in_sum"] or 0) for r in trend_rows]
     trend_cash_out = [float(r["cash_out_sum"] or 0) for r in trend_rows]
-
-    # Reviewer metrics (averages, highs, overseas, high-risk % etc.)
-    m = db.execute(f"""
-      SELECT
-        AVG(CASE WHEN t.direction='in'  AND lower(COALESCE(t.channel,''))='cash' THEN t.base_amount END) AS avg_cash_in,
-        AVG(CASE WHEN t.direction='out' AND lower(COALESCE(t.channel,''))='cash' THEN t.base_amount END) AS avg_cash_out,
-        AVG(CASE WHEN t.direction='in'  THEN t.base_amount END) AS avg_in,
-        AVG(CASE WHEN t.direction='out' THEN t.base_amount END) AS avg_out,
-        MAX(CASE WHEN t.direction='in'  THEN t.base_amount END) AS max_in,
-        MAX(CASE WHEN t.direction='out' THEN t.base_amount END) AS max_out,
-        SUM(CASE WHEN COALESCE(t.country_iso2,'')<>'' AND UPPER(t.country_iso2)<>'GB' AND t.direction='in' THEN t.base_amount ELSE 0 END) AS overseas_in,
-        SUM(CASE WHEN COALESCE(t.country_iso2,'')<>'' AND UPPER(t.country_iso2)<>'GB' AND t.direction='out' THEN t.base_amount ELSE 0 END) AS overseas_out,
-        SUM(t.base_amount) AS total_value
-      FROM transactions t {tx_pred}
-    """, tx_params).fetchone()
-
-    avg_cash_deposits     = float(m["avg_cash_in"]  or 0.0)
-    avg_cash_withdrawals  = float(m["avg_cash_out"] or 0.0)
-    avg_in                = float(m["avg_in"]       or 0.0)
-    avg_out               = float(m["avg_out"]      or 0.0)
-    max_in                = float(m["max_in"]       or 0.0)
-    max_out               = float(m["max_out"]      or 0.0)
-    overseas_in           = float(m["overseas_in"] or 0.0)
-    overseas_out          = float(m["overseas_out"] or 0.0)
-    total_val_from_query  = float(m["total_value"]  or 0.0)
-    # Use the earlier computed total_value if present; else fall back
-    denom_total = total_value if total_value > 0 else total_val_from_query
-
-    hr_val_row = db.execute(f"""
-      SELECT SUM(t.base_amount) AS v
-      FROM transactions t
-      JOIN ref_country_risk r ON r.iso2 = COALESCE(t.country_iso2, '')
-      {tx_pred + (' AND ' if tx_pred else 'WHERE ')} r.risk_level IN ('HIGH','HIGH_3RD','PROHIBITED')
-    """, tx_params).fetchone()
-    highrisk_value = float(hr_val_row["v"] or 0.0)
-    highrisk_pct   = (highrisk_value / denom_total * 100.0) if denom_total > 0 else 0.0
 
     metrics = {
         "avg_cash_deposits": avg_cash_deposits,
@@ -4046,15 +4869,18 @@ def dashboard():
         labels=labels, values=values,
         top_countries=top_countries,
         tiles=tiles,
-        trend_labels=trend_labels, 
-        trend_in=trend_in, 
+        trend_labels=trend_labels,
+        trend_in=trend_in,
         trend_out=trend_out,
         trend_cash_in=trend_cash_in,
         trend_cash_out=trend_cash_out,
         months=months,
         selected_period=period,
-        filter_meta={"customer_id": customer_id},
+        filter_meta={"customer_id": customer_id, "account": account},
+        accounts=_get_accounts_for_customer(customer_id),
+        selected_account=account,
         metrics=metrics,
+        scoring_status=_get_scoring_status(customer_id),
     )
 
 @app.route("/upload", methods=["GET","POST"])
@@ -4090,10 +4916,36 @@ def upload():
             flash(f"Customer {cust_id} created. You can now upload their transactions.")
             return redirect(url_for("upload", customer_id=cust_id))
 
+        # --- Delete a statement and its transactions ---
+        if action == "delete_statement":
+            stmt_id = request.form.get("statement_id", "").strip()
+            cust_id = request.form.get("customer_id", "").strip()
+            if stmt_id:
+                # Get statement info for audit log
+                stmt = db.execute("SELECT * FROM statements WHERE id=?", (stmt_id,)).fetchone()
+                if stmt:
+                    # Delete transactions that belong to this statement
+                    db.execute("DELETE FROM alerts WHERE txn_id IN (SELECT id FROM transactions WHERE statement_id=?)", (stmt_id,))
+                    db.execute("DELETE FROM transactions WHERE statement_id=?", (stmt_id,))
+                    db.execute("DELETE FROM statements WHERE id=?", (stmt_id,))
+                    db.commit()
+                    log_audit_event("STATEMENT_DELETED", session.get("user_id"), session.get("username"),
+                                    details=f"Deleted statement {stmt_id} (file: {stmt['filename']}) for customer {stmt['customer_id']}")
+                    flash(f"Statement '{stmt['filename']}' and its transactions deleted.")
+                else:
+                    flash("Statement not found.")
+            return redirect(url_for("upload", customer_id=cust_id))
+
         # --- Upload customer population CSV ---
         if action == "upload_customers":
             cust_file = request.files.get("customer_file")
             if cust_file and cust_file.filename:
+                # Server-side file extension validation (AGRA-001-1-11)
+                allowed_extensions = {'.csv', '.xlsx', '.xls'}
+                cust_file_ext = os.path.splitext(cust_file.filename)[1].lower()
+                if cust_file_ext not in allowed_extensions:
+                    flash(f"Invalid file type '{cust_file_ext}'. Only CSV and Excel files (.csv, .xlsx, .xls) are accepted.")
+                    return redirect(url_for("admin_customers"))
                 try:
                     import pandas as pd
                     fname = getattr(cust_file, 'filename', '') or ''
@@ -4138,6 +4990,14 @@ def upload():
                 flash("Please select a file.")
             return redirect(url_for("upload"))
 
+        # --- Re-score customer ---
+        if action == "rescore":
+            cid = request.form.get("customer_id", "").strip()
+            if cid:
+                submit_scoring(cid, purge_first=True)
+                flash(f"Scoring started for customer {cid}. This will complete in the background.")
+            return redirect(url_for("upload", customer_id=cid))
+
         # --- Upload transaction statement ---
         customer_id = request.form.get("customer_id", "").strip()
         account_name = request.form.get("account_name", "").strip()
@@ -4152,27 +5012,54 @@ def upload():
             flash(f"Customer {customer_id} not found in the system.")
             return redirect(url_for("upload"))
 
+        if not account_name:
+            flash("Please enter an account name/number.")
+            return redirect(url_for("upload", customer_id=customer_id))
+
         if not tx_file or not tx_file.filename:
             flash("Please select a transaction file to upload.")
             return redirect(url_for("upload", customer_id=customer_id))
 
-        try:
-            n, date_from, date_to = ingest_transactions_csv_for_customer(tx_file, customer_id)
+        # Server-side file extension validation
+        allowed_extensions = {'.csv', '.xlsx', '.xls'}
+        file_ext = os.path.splitext(tx_file.filename)[1].lower()
+        if file_ext not in allowed_extensions:
+            flash(f"Invalid file type '{file_ext}'. Only CSV and Excel files (.csv, .xlsx, .xls) are accepted.")
+            return redirect(url_for("upload", customer_id=customer_id))
 
+        try:
+            # Insert statement record (fast) so we have a stmt_id
             user_id = session.get("user_id")
+            username = session.get("username")
             db.execute("""
                 INSERT INTO statements(customer_id, account_name, filename, uploaded_by, record_count, date_from, date_to)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
-            """, (customer_id, account_name or None, tx_file.filename, user_id, n, date_from, date_to))
+                VALUES(?, ?, ?, ?, 0, NULL, NULL)
+            """, (customer_id, account_name or None, tx_file.filename, user_id))
             db.commit()
+            stmt_id = db.execute("SELECT MAX(id) AS sid FROM statements WHERE customer_id=?", (customer_id,)).fetchone()["sid"]
 
-            log_audit_event("TRANSACTION_UPLOAD", session.get("user_id"), session.get("username"),
-                            details=f"Uploaded {n} transactions for customer {customer_id} (account: {account_name or 'N/A'}, file: {tx_file.filename})")
+            # Save uploaded file to temp path (request.files won't survive after response)
+            orig_ext = os.path.splitext(tx_file.filename)[1] or ".csv"
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=orig_ext)
+            try:
+                with os.fdopen(tmp_fd, "wb") as tmp_f:
+                    tx_file.save(tmp_f)
+            except Exception:
+                os.close(tmp_fd)
+                raise
+
+            # Submit ingest + scoring to background thread — returns immediately
+            submit_ingest_and_score(
+                customer_id, tmp_path, stmt_id, tx_file.filename,
+                account_name, user_id, username
+            )
 
             acct_label = f" (Account: {account_name})" if account_name else ""
-            flash(f"Loaded {n} transactions for customer {customer_id}{acct_label} ({tx_file.filename})")
-        except ValueError as e:
-            flash(f"Error: {e}")
+            flash(f"Upload received for customer {customer_id}{acct_label} ({tx_file.filename}). "
+                  f"Ingesting and scoring in the background — this page will update automatically.")
+        except Exception as e:
+            app.logger.error(f"Upload failed for {customer_id}: {e}", exc_info=True)
+            flash(f"Error starting upload: {e}")
 
         return redirect(url_for("upload", customer_id=customer_id))
 
@@ -4198,14 +5085,29 @@ def upload():
         "total_statements": db.execute(
             "SELECT COUNT(*) as c FROM statements WHERE uploaded_by = %s", (uid,)
         ).fetchone()["c"],
-        "total_transactions": db.execute("""
-            SELECT COUNT(*) as c FROM transactions
-            WHERE customer_id IN (SELECT DISTINCT customer_id FROM statements WHERE uploaded_by = %s)
-        """, (uid,)).fetchone()["c"],
+        "total_transactions": db.execute(
+            "SELECT COALESCE(SUM(record_count), 0) as c FROM statements WHERE uploaded_by = %s", (uid,)
+        ).fetchone()["c"],
     }
 
+    scoring_info = _get_scoring_status(selected_customer) if selected_customer else None
     return render_template("upload.html", customers=customers, selected_customer=selected_customer,
-                           statements=statements, stats=stats)
+                           statements=statements, stats=stats,
+                           scoring_status=scoring_info)
+
+@app.route("/scoring_status/<customer_id>")
+@login_required
+def scoring_status(customer_id):
+    info = _get_scoring_status(customer_id)
+    if info and info["status"] == "scoring":
+        return jsonify({"status": "scoring"})
+    elif info and info["status"] == "error":
+        return jsonify({"status": "error", "message": info.get("msg", "")})
+    elif info and info["status"] == "done":
+        _clear_scoring_status(customer_id)
+        return jsonify({"status": "done"})
+    else:
+        return jsonify({"status": "idle"})
 
 @app.route("/alerts")
 @login_required
@@ -4216,15 +5118,18 @@ def alerts():
     sev  = (request.args.get("severity") or "").strip().upper()
     cust = (request.args.get("customer_id") or "").strip()
     tag  = (request.args.get("tag") or "").strip()  # NEW
+    acct = (request.args.get("account") or "").strip()
 
     # Blank state: require a customer to be selected
     if not cust:
-        return render_template("alerts.html", alerts=[], available_tags=[], no_customer=True)
+        return render_template("alerts.html", alerts=[], available_tags=[], accounts=[], no_customer=True)
 
     # Base query — always filtered by customer
     where, params = ["a.customer_id = ?"], [cust]
     if sev:
         where.append("a.severity = ?"); params.append(sev)
+    if acct:
+        where.append("t.account_name = ?"); params.append(acct)
 
     sql = f"""
       SELECT a.*, t.country_iso2, t.txn_date
@@ -4278,17 +5183,26 @@ def alerts():
         d["reasons"]   = ", ".join(x for x in reasons_list if x)
         d["rule_tags"] = ", ".join(tags_list)
         
-        # Format dates in UK format (DD/MM/YYYY)
+        # Format dates in UK format (DD/MM/YYYY or DD/MM/YYYY HH:MM if time present)
         if d.get("txn_date"):
             try:
                 from datetime import datetime, date as date_type
                 val = d["txn_date"]
-                if isinstance(val, (datetime, date_type)):
+                if isinstance(val, datetime):
+                    if val.hour == 0 and val.minute == 0 and val.second == 0:
+                        d["txn_date_uk"] = val.strftime("%d/%m/%Y")
+                    else:
+                        d["txn_date_uk"] = val.strftime("%d/%m/%Y %H:%M")
+                elif isinstance(val, date_type):
                     d["txn_date_uk"] = val.strftime("%d/%m/%Y")
                 else:
-                    dt = datetime.strptime(str(val), "%Y-%m-%d")
-                    d["txn_date_uk"] = dt.strftime("%d/%m/%Y")
-            except:
+                    s = str(val)
+                    dt = datetime.fromisoformat(s) if 'T' in s or len(s) > 10 else datetime.strptime(s[:10], "%Y-%m-%d")
+                    if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+                        d["txn_date_uk"] = dt.strftime("%d/%m/%Y")
+                    else:
+                        d["txn_date_uk"] = dt.strftime("%d/%m/%Y %H:%M")
+            except Exception:
                 d["txn_date_uk"] = str(d["txn_date"])
 
         if d.get("created_at"):
@@ -4301,7 +5215,7 @@ def alerts():
                     ca = str(val)[:19]
                     dt = datetime.strptime(ca, "%Y-%m-%d %H:%M:%S")
                     d["created_at_uk"] = dt.strftime("%d/%m/%Y %H:%M")
-            except:
+            except Exception:
                 d["created_at_uk"] = str(d["created_at"])[:16] if d["created_at"] else "—"
         
         out.append(d)
@@ -4310,6 +5224,7 @@ def alerts():
         "alerts.html",
         alerts=out,
         available_tags=available_tags,  # for the dropdown
+        accounts=_get_accounts_for_customer(cust),
     )
 
 # ---------- Manager Dashboard ----------
@@ -4525,10 +5440,25 @@ def admin_customers():
         elif action == "delete":
             cust_id = request.form.get("customer_id", "").strip()
             if cust_id:
-                db.execute("DELETE FROM customers WHERE customer_id=?", (cust_id,))
-                db.commit()
-                flash(f"Customer {cust_id} deleted.")
-        
+                try:
+                    db.execute("DELETE FROM alerts WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM transactions WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM statements WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM kyc_profile WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM customer_cash_limits WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM ai_rationales WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM ai_cases WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM scoring_jobs WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM customer_summaries WHERE customer_id=?", (cust_id,))
+                    db.execute("DELETE FROM customers WHERE customer_id=?", (cust_id,))
+                    db.commit()
+                    log_audit_event("CUSTOMER_DELETED", session.get("user_id"), session.get("username"),
+                                    details=f"Deleted customer {cust_id} and all associated data")
+                    flash(f"Customer {cust_id} and all associated data deleted.")
+                except Exception:
+                    db.connection.rollback()
+                    flash(f"Failed to delete customer {cust_id}.")
+
         return redirect(url_for("admin_customers"))
     
     # GET: list customers
@@ -4685,7 +5615,7 @@ def admin_users():
                 flash("User account unlocked.")
         
         elif action == "toggle_2fa_enforcement":
-            current = cfg_get('cfg_enforce_2fa', False, bool)
+            current = cfg_get('cfg_enforce_2fa', True, bool)
             cfg_set('cfg_enforce_2fa', not current)
             status = "enabled" if not current else "disabled"
             log_audit_event("2FA_ENFORCEMENT_CHANGED", session.get("user_id"), session.get("username"),
@@ -4706,7 +5636,7 @@ def admin_users():
     smtp_configured = bool(cfg_get('cfg_smtp_host', '', str))
     
     # Get 2FA enforcement status
-    enforce_2fa = cfg_get('cfg_enforce_2fa', False, bool)
+    enforce_2fa = cfg_get('cfg_enforce_2fa', True, bool)
     
     return render_template("admin_users.html", users=users, smtp_configured=smtp_configured, enforce_2fa=enforce_2fa)
 
@@ -4910,6 +5840,86 @@ def admin_usage_report():
                           all_rule_types=sorted(all_rule_types))
 
 
+# ---------- Admin: Templates ----------
+@app.route("/admin/templates", methods=["GET", "POST"])
+@admin_required
+def admin_templates():
+    """Admin page to view and edit outreach question templates, outreach email template, and rationale template."""
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        user = get_current_user()
+
+        if action == "save_questions":
+            bank = {}
+            tags = request.form.getlist("tag")
+            for tag in tags:
+                raw = request.form.get(f"questions_{tag}", "").strip()
+                if raw:
+                    bank[tag] = [q.strip() for q in raw.split("\n") if q.strip()]
+            cfg_set("tpl_question_bank", json.dumps(bank))
+            log_audit_event(
+                event_type="TEMPLATE_EDIT",
+                user_id=user["id"] if user else None,
+                username=user.get("username") if user else None,
+                details=json.dumps({"template": "question_bank"}),
+            )
+            flash("Outreach question templates saved.")
+
+        elif action == "save_outreach_email":
+            tpl = {
+                "subject": request.form.get("email_subject", "").strip(),
+                "greeting": request.form.get("email_greeting", "").strip(),
+                "intro": request.form.get("email_intro", "").strip(),
+                "questions_header": request.form.get("email_questions_header", "").strip(),
+                "closing": request.form.get("email_closing", "").strip(),
+                "sign_off": request.form.get("email_sign_off", "").strip(),
+            }
+            cfg_set("tpl_outreach_email", json.dumps(tpl))
+            log_audit_event(
+                event_type="TEMPLATE_EDIT",
+                user_id=user["id"] if user else None,
+                username=user.get("username") if user else None,
+                details=json.dumps({"template": "outreach_email"}),
+            )
+            flash("Outreach email template saved.")
+
+        elif action == "save_rationale":
+            tpl = request.form.get("rationale_template", "").strip()
+            cfg_set("tpl_rationale_structure", tpl)
+            log_audit_event(
+                event_type="TEMPLATE_EDIT",
+                user_id=user["id"] if user else None,
+                username=user.get("username") if user else None,
+                details=json.dumps({"template": "rationale_structure"}),
+            )
+            flash("Rationale output template saved.")
+
+        elif action == "reset_questions":
+            cfg_set("tpl_question_bank", "")
+            flash("Question templates reset to defaults.")
+
+        elif action == "reset_outreach_email":
+            cfg_set("tpl_outreach_email", "")
+            flash("Outreach email template reset to defaults.")
+
+        elif action == "reset_rationale":
+            cfg_set("tpl_rationale_structure", "")
+            flash("Rationale template reset to defaults.")
+
+        return redirect(url_for("admin_templates"))
+
+    # GET: load current values
+    question_bank = ai_question_bank()
+    email_tpl = _get_outreach_email_template()
+    rationale_tpl = cfg_get("tpl_rationale_structure", None) or ""
+
+    return render_template("admin_templates.html",
+        question_bank=question_bank,
+        email_tpl=email_tpl,
+        rationale_tpl=rationale_tpl,
+    )
+
+
 @app.route("/admin")
 @admin_required
 def admin():
@@ -5042,7 +6052,12 @@ def _enrich_questions_with_sentences(questions):
 
 
 def _month_bounds_for(date_str):
-    d = date_str if isinstance(date_str, date) else date.fromisoformat(str(date_str))
+    if isinstance(date_str, datetime):
+        d = date_str.date()
+    elif isinstance(date_str, date):
+        d = date_str
+    else:
+        d = date.fromisoformat(str(date_str)[:10])
     start = d.replace(day=1)
     # end of month
     end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
@@ -5103,13 +6118,13 @@ def _closing_prompt_for_base_question(base_q: str, tag: str) -> str:
         return "Please explain the reason for the recent level of cash activity on your account."
 
     if tag == "HISTORICAL_DEVIATION":
-        return "We’ve seen a spike compared to your typical activity. What is the reason, and should we expect similar amounts going forward?"
+        return "We've seen a spike compared to your typical activity. What is the reason, and should we expect similar amounts going forward?"
 
     if tag == "EXPECTED_BREACH_OUT":
-        return "Your outgoings are higher than you previously told us to expect. What is the reason, and should we expect this level to continue?"
+        return "Your outgoings are higher than your average. What is the reason, and should we expect this level to continue?"
 
     if tag == "EXPECTED_BREACH_IN":
-        return "Your incomings are higher than you previously told us to expect. What is the reason, and should we expect this level to continue?"
+        return "Your incomings are higher than your average. What is the reason, and should we expect this level to continue?"
 
     if tag == "NLP_RISK" or "narrative" in q or "documentation" in q:
         return "Please clarify the purpose of the payment(s) and your relationship with the payer/payee, and share any supporting documents (e.g., invoices/contracts)."
@@ -5157,8 +6172,13 @@ def _question_sentence_for_row(row: dict) -> str:
             "customer_id": s.get("customer_id"),
             "channel": (s.get("channel") or "").lower(),
             "narrative": s.get("narrative") or "",
+            "account_name": s.get("account_name") or "",
         })
     norm.sort(key=lambda x: x["date"])
+
+    # Determine account reference for the question (use the first available)
+    _acct = next((n["account_name"] for n in norm if n["account_name"]), "")
+    _acct_phrase = f" (account {_acct})" if _acct else ""
 
     def _fmt_date(d) -> str:
         from datetime import date as date_type
@@ -5177,8 +6197,8 @@ def _question_sentence_for_row(row: dict) -> str:
 
     # ---- CASH_DAILY_BREACH (ignore country; focus on cash usage) ----
     if tag == "CASH_DAILY_BREACH":
-        inc_cash = [i for i in norm if i["direction"] == "IN"  and i["channel"] == "cash"]
-        out_cash = [i for i in norm if i["direction"] == "OUT" and i["channel"] == "cash"]
+        inc_cash = [i for i in norm if i["direction"] == "IN"  and (i.get("channel") or "").lower() == "cash"]
+        out_cash = [i for i in norm if i["direction"] == "OUT" and (i.get("channel") or "").lower() == "cash"]
         # Fallback: if channel not present on source txns, treat all sources as cash (conservative)
         if not inc_cash and not out_cash:
             inc_cash = [i for i in norm if i["direction"] == "IN"]
@@ -5188,7 +6208,7 @@ def _question_sentence_for_row(row: dict) -> str:
             bits.append(f"{len(inc_cash)} cash deposit{'s' if len(inc_cash)!=1 else ''} valued at {_list_amount_dates(inc_cash)}")
         if out_cash:
             bits.append(f"{len(out_cash)} cash withdrawal{'s' if len(out_cash)!=1 else ''} valued at {_list_amount_dates(out_cash)}")
-        front = "Our records show " + " and ".join(bits) + "."
+        front = f"Our records show{_acct_phrase} " + " and ".join(bits) + "."
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
 
@@ -5196,7 +6216,7 @@ def _question_sentence_for_row(row: dict) -> str:
     if tag == "HISTORICAL_DEVIATION":
         # Use direction of the largest txn among sources
         spike = max(norm, key=lambda x: x["amount"])
-        front = (f"Our records show a higher-than-usual transaction of £{spike['amount']:,.2f} "
+        front = (f"Our records show{_acct_phrase} a higher-than-usual transaction of £{spike['amount']:,.2f} "
                  f"on {_fmt_date(spike['date'])}.")
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
@@ -5211,17 +6231,15 @@ def _question_sentence_for_row(row: dict) -> str:
         # Format YYYY-MM as "Month Year" (e.g., "January 2026")
         try:
             ym_formatted = datetime.strptime(ym, "%Y-%m").strftime("%B %Y")
-        except:
+        except Exception:
             ym_formatted = ym
-        front = (f"Our records show your {dir_word} in {ym_formatted} totalled £{y:,.2f}, "
-                 f"compared to your stated expectation of £{x:,.2f}.")
+        front = (f"Our records show{_acct_phrase} your {dir_word} in {ym_formatted} totalled £{y:,.2f}, "
+                 f"compared to your average of £{x:,.2f}.")
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
 
     # ---- NLP_RISK (surface risky terms; ask for purpose + relationship) ----
     if tag == "NLP_RISK":
-        hits = _risky_terms_used([i["narrative"] for i in norm if i["narrative"]])
-        hit_txt = f" (keywords noted: {', '.join(hits)})" if hits else ""
         # Summarise sent/received without country to keep neutral
         inc = [i for i in norm if i["direction"] == "IN"]
         out = [i for i in norm if i["direction"] == "OUT"]
@@ -5232,10 +6250,10 @@ def _question_sentence_for_row(row: dict) -> str:
         if out:
             verb = "was sent" if len(out) == 1 else "were sent"
             bits.append(f"{len(out)} transaction{'s' if len(out)!=1 else ''} {verb} valued at {_list_amount_dates(out)}")
-        front = ("Our records show " + " and ".join(bits) + "." if bits else "We are reviewing recent activity.")
+        front = (f"Our records show{_acct_phrase} " + " and ".join(bits) + "." if bits else "We are reviewing recent activity.")
         total = len(inc) + len(out)
         payment_word = "this payment" if total == 1 else "these payments"
-        s = f"{front} We'd like to understand {payment_word}{hit_txt}. {closing}"
+        s = f"{front} We'd like to understand {payment_word}. {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
 
     # ---- Jurisdictional (by country, sent/received) ----
@@ -5255,14 +6273,14 @@ def _question_sentence_for_row(row: dict) -> str:
                 verb = "was sent" if len(out) == 1 else "were sent"
                 segs.append(f"{len(out)} transaction{'s' if len(out)!=1 else ''} {verb} to {country} valued at {_list_amount_dates(out)}")
             parts.append(" and ".join(segs))
-        front = "Our records show " + " and ".join(parts) + "."
+        front = f"Our records show{_acct_phrase} " + " and ".join(parts) + "."
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
 
     # ---- STRUCTURING (transactions of similar amounts) ----
     if tag == "STRUCTURING":
         amounts = sorted(norm, key=lambda x: x["amount"], reverse=True)
-        front = (f"Our records show {len(amounts)} transaction{'s' if len(amounts)!=1 else ''} "
+        front = (f"Our records show{_acct_phrase} {len(amounts)} transaction{'s' if len(amounts)!=1 else ''} "
                  f"of similar amounts, valued at {_list_amount_dates(amounts)}.")
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
@@ -5278,7 +6296,7 @@ def _question_sentence_for_row(row: dict) -> str:
         if out:
             verb = "was sent" if len(out) == 1 else "were sent"
             bits.append(f"{len(out)} transaction{'s' if len(out)!=1 else ''} {verb} valued at {_list_amount_dates(out)}")
-        front = "Our records show " + " and ".join(bits) + " within a short period."
+        front = f"Our records show{_acct_phrase} " + " and ".join(bits) + " within a short period."
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
 
@@ -5286,7 +6304,7 @@ def _question_sentence_for_row(row: dict) -> str:
     if tag == "HIGH_VELOCITY":
         total_amt = sum(i["amount"] for i in norm)
         date_range = f"between {_fmt_date(norm[0]['date'])} and {_fmt_date(norm[-1]['date'])}" if len(norm) > 1 else f"on {_fmt_date(norm[0]['date'])}"
-        front = (f"Our records show {len(norm)} transactions totalling £{total_amt:,.2f} "
+        front = (f"Our records show{_acct_phrase} {len(norm)} transactions totalling £{total_amt:,.2f} "
                  f"{date_range}, which represents a higher-than-usual level of activity.")
         s = f"{front} {closing}"
         return s if s.endswith("?") else s.rstrip('.') + "?"
@@ -5294,7 +6312,7 @@ def _question_sentence_for_row(row: dict) -> str:
     # ---- DORMANCY_REACTIVATION (account inactive then resumed) ----
     if tag == "DORMANCY_REACTIVATION":
         total_amt = sum(i["amount"] for i in norm)
-        front = (f"Our records show that after an extended period of inactivity, "
+        front = (f"Our records show{_acct_phrase} that after an extended period of inactivity, "
                  f"{len(norm)} transaction{'s' if len(norm)!=1 else ''} totalling £{total_amt:,.2f} "
                  f"{'have' if len(norm)!=1 else 'has'} recently been processed on your account.")
         s = f"{front} {closing}"
@@ -5310,39 +6328,65 @@ def _question_sentence_for_row(row: dict) -> str:
     if out:
         verb = "was sent" if len(out) == 1 else "were sent"
         bits.append(f"{len(out)} transaction{'s' if len(out)!=1 else ''} {verb} valued at {_list_amount_dates(out)}")
-    front = "Our records show " + " and ".join(bits) + "."
+    front = f"Our records show{_acct_phrase} " + " and ".join(bits) + "."
     s = f"{front} {closing}"
     return s if s.endswith("?") else s.rstrip('.') + "?"
 
 # ---------- AI route (with outreach support) ----------
 
+def _default_outreach_email_template():
+    """Built-in defaults for the outreach email template."""
+    return {
+        "subject": "Information request regarding recent account activity ({customer_id})",
+        "greeting": "Dear Customer,",
+        "intro": "We're reviewing recent activity on your account and would be grateful if you could provide further information to help us complete our checks.",
+        "questions_header": "Please respond to the questions below:",
+        "closing": "If you have any supporting documents (e.g., invoices or contracts), please include them.",
+        "sign_off": "Kind regards,\nCompliance Team",
+    }
+
+def _get_outreach_email_template():
+    """Return outreach email template, loading from DB config if available."""
+    raw = cfg_get("tpl_outreach_email", None)
+    if raw:
+        try:
+            tpl = json.loads(raw)
+            if isinstance(tpl, dict) and tpl:
+                defaults = _default_outreach_email_template()
+                defaults.update(tpl)
+                return defaults
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return _default_outreach_email_template()
+
 def _build_outreach_email(customer_id: str, rows: list) -> str:
     """
     Build a plain-text outreach email using the customer-friendly questions.
+    Questions marked as 'not required' are excluded from the email.
     """
+    active_rows = [r for r in rows if not r.get("not_required")]
+
+    tpl = _get_outreach_email_template()
     when = datetime.now().strftime("%d %B %Y")
     lines = []
-    lines.append(f"Subject: Information request regarding recent account activity ({customer_id})")
+    lines.append(f"Subject: {tpl['subject'].format(customer_id=customer_id)}")
     lines.append("")
-    lines.append("Dear Customer,")
+    lines.append(tpl["greeting"])
     lines.append("")
-    lines.append(
-        "We’re reviewing recent activity on your account and would be grateful if you could "
-        "provide further information to help us complete our checks."
-    )
+    lines.append(tpl["intro"])
     lines.append("")
-    lines.append("Please respond to the questions below:")
+    lines.append(tpl["questions_header"])
     lines.append("")
-    for i, r in enumerate(rows, start=1):
+    for i, r in enumerate(active_rows, start=1):
         q = (r.get("question_nice") or r.get("question") or "").strip()
         if q and not q.endswith("?"):
             q += "?"
         lines.append(f"{i}. {q}")
     lines.append("")
-    lines.append("If you have any supporting documents (e.g., invoices or contracts), please include them.")
+    lines.append(tpl["closing"])
     lines.append("")
-    lines.append("Kind regards,")
-    lines.append("Compliance Team")
+    for sign_line in tpl["sign_off"].split("\n"):
+        lines.append(sign_line)
     lines.append(when)
     return "\n".join(lines)
 
@@ -5375,7 +6419,7 @@ def ai_analysis():
     period = request.values.get("period", "all")
     action = request.values.get("action")
 
-    # remember the user’s current customer for this browser session
+    # remember the user's current customer for this browser session
     _remember_customer_for_session(cust)
 
     # Resolve period bounds
@@ -5485,7 +6529,8 @@ def ai_analysis():
 
             final_questions = list(base_questions)
             if llm_enabled():
-                final_questions = ai_normalise_questions_llm(cust, fired_tags, source_alerts, base_questions)
+                tag_count = max(len(set(fired_tags)), len(base_questions), 6)
+                final_questions = ai_normalise_questions_llm(cust, fired_tags, source_alerts, base_questions, max_count=tag_count)
                 used_llm = True
 
             # Persist (overwrite) with sources (txn_ids)
@@ -5510,10 +6555,12 @@ def ai_analysis():
         if action == "save":
             case_id = int(request.values.get("case_id"))
             for qid in request.values.getlist("qid"):
+                nr = request.values.get(f"nr_{qid}") == "1"
+                nr_rationale = request.values.get(f"nr_rationale_{qid}", "").strip() if nr else ""
                 ans = request.values.get(f"answer_{qid}", "")
                 db.execute(
-                    "UPDATE ai_answers SET answer=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (ans, qid),
+                    "UPDATE ai_answers SET answer=?, not_required=?, not_required_rationale=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (ans, nr, nr_rationale, qid),
                 )
             db.execute("UPDATE ai_cases SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (case_id,))
             db.commit()
@@ -5613,7 +6660,7 @@ def _format_date_uk(date_str) -> str:
         day = dt.day
         suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
         return f"{day}{suffix} {dt.strftime('%B %Y')}"
-    except:
+    except Exception:
         return str(date_str)
 
 def _period_text(p_from: Optional[str] = None, p_to: Optional[str] = None) -> str:
@@ -5677,47 +6724,47 @@ def build_rationale_text(
     customer_id: str,
     p_from: Optional[str],
     p_to: Optional[str],
-    nature_of_business: Optional[str],
-    est_income: Optional[float],
-    est_expenditure: Optional[float],
+    entity_type: Optional[str] = "company",
+    nature_of_business: Optional[str] = None,
+    est_income: Optional[float] = None,
+    est_expenditure: Optional[float] = None,
 ) -> str:
     m = _customer_metrics(customer_id, p_from, p_to)
     case, answers = _answers_summary(customer_id)
+    is_individual = (entity_type or "").lower() == "individual"
+    review_date = datetime.now().strftime("%d %B %Y")
 
-    def _period_text(pf: Optional[str], pt: Optional[str]) -> str:
+    def _period_text(pf, pt):
         if pf and pt:
             return f"{_format_date_uk(pf)} to {_format_date_uk(pt)}"
-        return "the period reviewed"
+        return "all available data"
 
     period_txt = _period_text(p_from, p_to)
+    months = int(m.get("period_months") or 1)
 
-    # --- Outreach plausibility (kept but only used to shape tone if no tag-specific rewrite) ---
+    # --- Plausibility scoring for outreach tone ---
+    def _plausibility_score(ans, tag):
+        if not ans: return 0
+        a = ans.lower()
+        s = 0
+        # +detail
+        if len(a) >= 80: s += 2
+        if any(w in a for w in ["invoice","payroll","utilities","supplier","contract","order","shipment"]): s += 2
+        if any(w in a for w in ["bank statement","receipt","evidence","documentation","proof"]): s += 2
+        if any(w in a for w in ["gift","loan","family","friend"]): s += 1
+        if any(w in a for w in ["awaiting","will provide","checking","confirming"]): s += 1
+        # vagueness / hedging
+        if any(w in a for w in ["don't know","no idea","can't remember","misc","various"]): s -= 3
+        if any(w in a for w in ["just because","personal reasons"]): s -= 2
+        if any(w in a for w in ["cash","cash deposit"]) and tag.upper() != "CASH_DAILY_BREACH": s -= 1
+        # tag-specific alignment
+        t = (tag or "").upper()
+        if t == "PROHIBITED_COUNTRY" and any(w in a for w in ["russia","ru","sanction","export control"]): s += 1
+        if t in ("HIGH_RISK_COUNTRY","HIGH_3RD") and any(w in a for w in ["third party","intermediary","agent"]): s += 1
+        return s
+
     n_answers = 0
     plaus_scores = []
-
-    def _plausibility_score(ans: str, tag: str) -> int:
-        if not ans:
-            return 0
-        a = ans.lower()
-        score = 0
-        # +detail
-        if len(a) >= 80: score += 2
-        if any(w in a for w in ["invoice", "payroll", "utilities", "supplier", "contract", "order", "shipment"]): score += 2
-        if any(w in a for w in ["bank statement", "receipt", "evidence", "documentation", "proof"]): score += 2
-        if any(w in a for w in ["gift", "loan", "family", "friend"]): score += 1
-        if any(w in a for w in ["awaiting", "will provide", "checking", "confirming"]): score += 1
-        # vagueness / hedging
-        if any(w in a for w in ["don't know", "no idea", "can’t remember", "misc", "various"]): score -= 3
-        if any(w in a for w in ["just because", "personal reasons"]): score -= 2
-        if any(w in a for w in ["cash", "cash deposit"]) and tag.upper() != "CASH_DAILY_BREACH": score -= 1
-        # light tag alignment
-        t = (tag or "").upper()
-        if t == "PROHIBITED_COUNTRY" and any(w in a for w in ["russia", "ru", "sanction", "export control"]):
-            score += 1
-        if t in ("HIGH_RISK_COUNTRY","HIGH_3RD") and any(w in a for w in ["third party", "intermediary", "agent"]):
-            score += 1
-        return score
-
     if answers:
         for r in answers:
             ans = (r.get("answer") or "").strip()
@@ -5727,303 +6774,353 @@ def build_rationale_text(
 
     if n_answers:
         avg_p = sum(plaus_scores) / max(1, len(plaus_scores))
-        if avg_p >= 3:
-            outreach_tone = "Customer explanations appear broadly plausible and evidence-led."
-        elif avg_p >= 1:
-            outreach_tone = "Customer explanations provide some relevant detail; further corroboration may be appropriate."
-        else:
-            outreach_tone = "Customer explanations lack sufficient detail and require clarification."
+        if avg_p >= 3: outreach_tone = "Customer explanations appear broadly plausible and evidence-led."
+        elif avg_p >= 1: outreach_tone = "Customer explanations provide some relevant detail; further corroboration may be appropriate."
+        else: outreach_tone = "Customer explanations lack sufficient detail and require clarification."
     else:
         outreach_tone = "Outreach questions prepared; responses currently awaited."
 
-    # --- period months for averages (for estimate comparison) ---
-    def _months_in_period() -> int:
-        if m.get("period_months"):
-            try:
-                pm = int(m["period_months"])
-                return pm if pm > 0 else 1
-            except Exception:
-                pass
-        if p_from and p_to:
-            try:
-                d1 = date.fromisoformat(p_from)
-                d2 = date.fromisoformat(p_to)
-                days = max(1, (d2 - d1).days)
-                return max(1, round(days / 30))
-            except Exception:
-                return 1
-        return 1
-
-    months = _months_in_period()
-
-    def _line_for_estimate(avg_val: float, est_val: Optional[float], label: str) -> Optional[str]:
-        if est_val is None or est_val <= 0:
-            return None
-        diff = avg_val - est_val
-        pct = (diff / est_val) * 100.0
-        abs_pct = abs(pct)
-        if abs_pct <= 20:
-            stance = "in line with"
-        elif pct > 0:
-            stance = "above"
-        else:
-            stance = "below"
-        return (
-            f"Average monthly {label} of £{avg_val:,.0f} is {stance} the estimate "
-            f"(£{est_val:,.0f}{'' if stance=='in line with' else f', by {abs_pct:.0f}%'})."
-        )
-
-    avg_monthly_in  = (m.get("total_in") or 0.0)  / months
+    avg_monthly_in  = (m.get("total_in") or 0.0) / months
     avg_monthly_out = (m.get("total_out") or 0.0) / months
 
-    income_line = _line_for_estimate(avg_monthly_in,  est_income,       "credits")
-    spend_line  = _line_for_estimate(avg_monthly_out, est_expenditure,  "debits")
+    # --- Helper: get answer for a specific tag ---
+    def _answer_for_tag(tag_name):
+        if not answers: return ""
+        tag_answers = [r for r in answers if (r.get("tag") or "").upper() == tag_name.upper()]
+        return (tag_answers[0].get("answer") or "").strip() if tag_answers else ""
 
-    # --- Friendly zero phrasing & composition helpers ---
-    def _cash_phrase():
-        ci, co = float(m.get("cash_in") or 0), float(m.get("cash_out") or 0)
-        return "There has been no cash usage." if ci == 0 and co == 0 else \
-               f"Cash activity: deposits £{ci:,.2f}, withdrawals £{co:,.2f}."
+    # --- Helper: documentation heuristic ---
+    def _doc_status(answer_txt):
+        if not answer_txt: return ""
+        al = answer_txt.lower()
+        doc_words = ["invoice","contract","agreement","evidence","documentation","proof","bank statement","receipt","attached","enclosed"]
+        neg_words = ["no ","not ","haven't ","hasn't ","without ","missing ","awaiting "]
+        has_doc = any(w in al for w in doc_words)
+        has_neg = any(n in al and any(w in al[al.find(n):al.find(n)+30] for w in doc_words) for n in neg_words)
+        if has_doc and not has_neg: return "Supporting documentation referenced."
+        if has_doc and has_neg: return "No supporting documentation provided."
+        return ""
 
-    def _overseas_phrase():
-        ov = float(m.get("overseas") or 0)
-        return "There have been no overseas transactions." if ov == 0 else \
-               f"Overseas activity accounts for {float(m.get('overseas_pct') or 0):.1f}% of value (£{ov:,.2f})."
+    # --- Helper: country query for jurisdictional tags ---
+    def _country_detail_for_tag(rule_tag):
+        qp = [customer_id]
+        wh = f"a.customer_id=? AND a.rule_tags LIKE ?"
+        qp.append(f'%{rule_tag}%')
+        if p_from and p_to:
+            wh += " AND t.txn_date BETWEEN ? AND ?"
+            qp += [p_from, p_to]
+        rows = get_db().execute(f"""
+            SELECT t.country_iso2, COUNT(DISTINCT t.id) AS cnt, SUM(t.base_amount) AS val
+            FROM alerts a JOIN transactions t ON t.id=a.txn_id
+            WHERE {wh} GROUP BY t.country_iso2
+        """, qp).fetchall()
+        parts = []
+        total_val = 0.0
+        total_cnt = 0
+        for r in rows:
+            if r["country_iso2"]:
+                cn = country_full_name(r["country_iso2"])
+                parts.append(f"{cn} ({r['country_iso2']}): {r['cnt']} transaction(s), GBP {float(r['val'] or 0):,.2f}")
+                total_val += float(r["val"] or 0)
+                total_cnt += int(r["cnt"])
+        return parts, total_cnt, total_val
 
-    def _hr_phrase():
-        hr = float(m.get("hr_val") or 0)
-        if hr == 0:
-            return "No transactions were recorded through high-risk or prohibited corridors."
-        return f"High-risk/high-risk-third/prohibited corridors account for {float(m.get('hr_pct') or 0):.1f}% of value (£{hr:,.2f})."
-
-    cash_line = _cash_phrase()
-    overseas_line = _overseas_phrase()
-    hr_line = _hr_phrase()
-
-    # --- Business alignment (keywords from nature_of_business vs narratives) ---
+    # --- Business alignment ---
     def _alignment_phrase():
+        if is_individual: return None
         nob = (nature_of_business or "").strip().lower()
-        if not nob:
-            return None
+        if not nob: return None
         stop = {"and","the","of","for","to","with","a","an","in","on","ltd","plc","inc","co"}
         kws = sorted({w.strip(",./-()") for w in nob.split() if len(w) >= 4 and w not in stop})
-        if not kws:
-            return None
-
-        rows = get_db().execute(
-            """
-            SELECT narrative
-              FROM transactions
-             WHERE customer_id=? AND (? IS NULL OR txn_date>=?) AND (? IS NULL OR txn_date<=?)
-             LIMIT 5000
-            """,
-            (customer_id, p_from, p_from, p_to, p_to)
-        ).fetchall()
-
+        if not kws: return None
+        rows = get_db().execute("""
+            SELECT narrative FROM transactions
+            WHERE customer_id=? AND (? IS NULL OR txn_date>=?) AND (? IS NULL OR txn_date<=?)
+            LIMIT 5000
+        """, (customer_id, p_from, p_from, p_to, p_to)).fetchall()
         total = len(rows)
-        if total == 0:
-            return None
-
-        hits = 0
-        for r in rows:
-            text = (r["narrative"] or "").lower()
-            if any(k in text for k in kws):
-                hits += 1
-
+        if total == 0: return None
+        hits = sum(1 for r in rows if any(k in (r["narrative"] or "").lower() for k in kws))
         ratio = hits / total
         eg = ", ".join(kws[:3])
         if ratio >= 0.5:
-            return f"Most transactions (≈{ratio*100:.0f}%) reference terms consistent with the declared business (e.g., {eg})."
+            return f"   Most transactions ({ratio*100:.0f}%) reference terms consistent with the declared business (e.g. {eg})."
         if ratio >= 0.2:
-            return f"A minority of transactions (≈{ratio*100:.0f}%) reference business-aligned terms (e.g., {eg}); the remainder appear generic."
-        return "Transaction descriptions do not strongly indicate the declared business; consider corroborating with additional evidence."
+            return f"   A minority of transactions ({ratio*100:.0f}%) reference business-aligned terms (e.g. {eg}); the remainder appear generic."
+        return "   Transaction descriptions do not strongly indicate the declared business; consider corroborating with additional evidence."
 
-    alignment_line = _alignment_phrase()
+    # --- Per-tag alert detail ---
+    def _alert_detail_for_tag(tag_name, count):
+        lines = []
+        tag = tag_name.upper()
 
-    # --- Alerts + Outreach: collapse into single, country-explicit sentence for PROHIBITED_COUNTRY ---
-    def _prohibited_country_sentence() -> Optional[str]:
-        # Find distinct countries and count transactions linked to prohibited alerts in the period
-        params = [customer_id]
-        where = "a.customer_id=? AND json_extract(a.rule_tags, '$') IS NOT NULL AND a.rule_tags LIKE '%PROHIBITED_COUNTRY%'"
-        if p_from and p_to:
-            where += " AND t.txn_date BETWEEN ? AND ?"
-            params += [p_from, p_to]
-        
-        # Get country details with transaction count
-        rows = get_db().execute(
-            f"""
-            SELECT t.country_iso2, COUNT(DISTINCT t.id) as txn_count
-              FROM alerts a
-              JOIN transactions t ON t.id = a.txn_id
-             WHERE {where}
-             GROUP BY t.country_iso2
-            """, params
-        ).fetchall()
-        
-        # Build country string with transaction counts
-        country_parts = []
-        total_txn_count = 0
-        for r in rows:
-            if r["country_iso2"]:
-                country_name = country_full_name(r["country_iso2"])
-                txn_count = r["txn_count"]
-                total_txn_count += txn_count
-                country_parts.append((country_name, txn_count))
-        
-        if not country_parts:
-            countries_str = "a prohibited jurisdiction"
-            txn_phrase = "transactions"
-        elif len(country_parts) == 1:
-            country_name, txn_count = country_parts[0]
-            countries_str = country_name
-            txn_phrase = "1 transaction" if txn_count == 1 else f"{txn_count} transactions"
+        if tag in ("PROHIBITED_COUNTRY", "HIGH_RISK_COUNTRY"):
+            label = "prohibited" if tag == "PROHIBITED_COUNTRY" else "high-risk"
+            parts, total_cnt, total_val = _country_detail_for_tag(tag)
+            lines.append(f"       Transactions: {total_cnt} involving {label} jurisdiction(s)")
+            lines.append(f"       Total value: GBP {total_val:,.2f}")
+            if parts:
+                for p in parts:
+                    lines.append(f"         - {p}")
+
+        elif tag == "CASH_DAILY_BREACH":
+            lines.append(f"       Breach events: {count}")
+            ci, co = float(m.get("cash_in") or 0), float(m.get("cash_out") or 0)
+            lines.append(f"       Total cash activity in period: deposits GBP {ci:,.2f}, withdrawals GBP {co:,.2f}")
+
+        elif tag == "HISTORICAL_DEVIATION":
+            lines.append(f"       Transactions flagged: {count}")
+            lines.append(f"       Largest credit: GBP {float(m.get('max_in') or 0):,.2f} (avg GBP {float(m.get('avg_in') or 0):,.2f})")
+            lines.append(f"       Largest debit:  GBP {float(m.get('max_out') or 0):,.2f} (avg GBP {float(m.get('avg_out') or 0):,.2f})")
+
+        elif tag == "NLP_RISK":
+            lines.append(f"       Transactions flagged: {count}")
+            lines.append("       Flagged due to narrative content analysis.")
+
+        elif tag == "STRUCTURING":
+            lines.append(f"       Transactions flagged: {count}")
+            lines.append("       Pattern of transactions at similar amounts just below reporting threshold detected.")
+
+        elif tag == "FLOW_THROUGH":
+            lines.append(f"       Transactions flagged: {count}")
+            lines.append("       Funds received and sent within a short period in matching amounts.")
+
+        elif tag == "DORMANCY_REACTIVATION":
+            lines.append(f"       Transactions flagged: {count}")
+            lines.append("       Significant transaction after a prolonged period of account inactivity.")
+
+        elif tag == "HIGH_VELOCITY":
+            lines.append(f"       Transactions flagged: {count}")
+            lines.append("       High volume of transactions processed within a short timeframe.")
+
+        elif tag in ("EXPECTED_BREACH_IN", "EXPECTED_BREACH_OUT"):
+            direction = "incomings" if "IN" in tag else "outgoings"
+            avg_val = avg_monthly_in if "IN" in tag else avg_monthly_out
+            exp_val = float(m.get("expected_in") or 0) if "IN" in tag else float(m.get("expected_out") or 0)
+            lines.append(f"       Monthly {direction} exceeded declared expectations.")
+            if exp_val > 0:
+                lines.append(f"       Actual avg: GBP {avg_val:,.0f} vs Expected: GBP {exp_val:,.0f}")
+
         else:
-            countries_str = ", ".join(sorted(set(cp[0] for cp in country_parts)))
-            txn_phrase = f"{total_txn_count} transactions"
+            lines.append(f"       Transactions flagged: {count}")
 
-        # Choose the most relevant/first prohibited-country answer if present
-        pc_answers = [r for r in (answers or []) if (r.get("tag") or "").upper() == "PROHIBITED_COUNTRY"]
-        answer_txt = (pc_answers[0].get("answer") or "").strip() if pc_answers else ""
-
-        # Documentation heuristic - check for positive mentions of documentation
-        # but exclude negations like "no invoice", "not provided", "haven't received"
-        answer_lower = (answer_txt or "").lower()
-        doc_keywords = ["invoice", "contract", "agreement", "evidence", "documentation", "proof", "bank statement", "receipt", "attached", "enclosed"]
-        negation_patterns = ["no ", "not ", "haven't ", "hasn't ", "without ", "missing ", "awaiting ", "waiting for "]
-        
-        has_doc_keyword = any(w in answer_lower for w in doc_keywords)
-        has_negation_before_doc = any(
-            neg in answer_lower and any(w in answer_lower[answer_lower.find(neg):answer_lower.find(neg)+30] for w in doc_keywords)
-            for neg in negation_patterns
-        )
-        mentions_docs = has_doc_keyword and not has_negation_before_doc
-
-        if answer_txt:
-            # Quote the customer's response to make it clear this is their statement, not the reviewer's
-            sentence = (
-                f"Alerts show {txn_phrase} to {countries_str}, which is a Prohibited Country. "
-                f"The customer stated: \"{answer_txt.strip().rstrip('.')}\" "
-                f"{'(supporting documentation has been provided).' if mentions_docs else '(no supporting documentation has been provided).'}"
-            )
+        # Customer response
+        ans_txt = _answer_for_tag(tag_name)
+        if ans_txt:
+            lines.append(f"       Customer response: \"{ans_txt}\"")
+            doc = _doc_status(ans_txt)
+            if doc:
+                lines.append(f"       {doc}")
         else:
-            sentence = (
-                f"Alerts show {txn_phrase} to {countries_str}, which is a Prohibited Country. "
-                "Customer outreach responses are awaited."
-            )
-        return sentence
+            lines.append("       No customer response received.")
 
-    def _alerts_sentence() -> str:
-        tags = dict(m.get("tag_counter") or {})
-        if not tags:
-            return "No alerts were noted in the review period."
-        if "PROHIBITED_COUNTRY" in tags:
-            return _prohibited_country_sentence() or "No alerts were noted in the review period."
-        # fallback: name other tags cleanly
-        tag_bits = [tg.replace("_", " ").title() for tg in sorted(tags.keys())]
-        return "Alerts noted: " + ", ".join(tag_bits) + "."
+        return lines
 
-    def _outreach_questions_and_responses_section() -> str:
-        """
-        Build a clear, auditable section listing ALL outreach questions and their responses.
-        This ensures traceability - reviewers can see exactly what was asked and what the customer said.
-        """
-        if not answers:
-            return ""
-        
-        section_lines = []
-        section_lines.append("")
-        section_lines.append("--- Outreach Questions & Responses ---")
-        
-        for idx, r in enumerate(answers, 1):
-            question = (r.get("question") or "").strip()
-            ans = (r.get("answer") or "").strip()
-            tag = (r.get("tag") or "").upper()
-            tag_nice = tag.replace("_", " ").title() if tag else "General"
-            
-            # Format: Q1 (Alert Type): Question text
-            q_line = f"Q{idx} ({tag_nice}): {question[:200]}{'...' if len(question) > 200 else ''}"
-            section_lines.append(q_line)
-            
-            # Format: A1: Response or [No response received]
-            if ans:
-                # Check if documentation was mentioned (but also check for negation)
-                ans_lower = ans.lower()
-                has_negation = any(neg in ans_lower for neg in [
-                    "no ", "not ", "don't", "haven't", "wasn't", "didn't", "without"
-                ])
-                mentions_docs = any(w in ans_lower for w in [
-                    "invoice", "contract", "agreement", "evidence", "documentation",
-                    "proof", "bank statement", "receipt"
-                ])
-                
-                # Only mark as "documentation referenced" if docs mentioned WITHOUT negation
-                if mentions_docs and not has_negation:
-                    doc_note = " [Documentation referenced]"
-                elif mentions_docs and has_negation:
-                    doc_note = " [No documentation provided]"
-                else:
-                    doc_note = ""
-                
-                a_line = f"A{idx}: {ans}{doc_note}"
-            else:
-                a_line = f"A{idx}: [No response received]"
-            
-            section_lines.append(a_line)
-            section_lines.append("")  # Blank line between Q&A pairs
-        
-        return "\n".join(section_lines)
+    # ===================================================================
+    # COMPOSE STRUCTURED RATIONALE
+    # ===================================================================
+    out = []
 
-    # --- Compose final text (single cohesive section; no duplicated blocks) ---
-    lines = []
-    if nature_of_business:
-        lines.append(f"Nature of business: {nature_of_business.strip()}.")
+    # --- Header ---
+    out.append("=" * 80)
+    out.append("                     TRANSACTION REVIEW RATIONALE")
+    out.append("=" * 80)
+    out.append("")
 
-    lines.append(
-        "Analysis of account transactions over "
-        f"{period_txt}. Credits total £{(m.get('total_in') or 0):,.2f} "
-        f"(avg £{(m.get('avg_in') or 0):,.2f}; largest £{(m.get('max_in') or 0):,.2f}); "
-        f"debits total £{(m.get('total_out') or 0):,.2f} "
-        f"(avg £{(m.get('avg_out') or 0):,.2f}; largest £{(m.get('max_out') or 0):,.2f})."
-    )
+    # --- 1. Review Overview ---
+    out.append("1. REVIEW OVERVIEW")
+    out.append(f"   Customer ID:     {customer_id}")
+    out.append(f"   Entity Type:     {'Individual' if is_individual else 'Company'}")
+    if not is_individual and nature_of_business:
+        out.append(f"   Nature of Business: {nature_of_business.strip()}")
+    out.append(f"   Review Period:   {period_txt} ({months} month{'s' if months != 1 else ''})")
+    out.append(f"   Date of Review:  {review_date}")
+    acct_names = m.get("account_names") or []
+    if acct_names:
+        out.append(f"   Accounts:        {len(acct_names)} ({', '.join(acct_names)})")
+    out.append("")
 
-    # Cash/overseas/hr (use friendly zero phrasing and avoid duplicating numbers you asked to remove earlier)
-    lines.append(cash_line)
-    lines.append(overseas_line)
-    if float(m.get("hr_val") or 0) > 0:
-        lines.append(hr_line)
+    # --- 2. Transaction Summary ---
+    out.append("2. TRANSACTION SUMMARY")
+    n_total = int(m.get("n_total") or 0)
+    n_in = int(m.get("n_in") or 0)
+    n_out = int(m.get("n_out") or 0)
+    out.append(f"   Total Transactions:    {n_total:,} ({n_in:,} credits, {n_out:,} debits)")
+    out.append(f"   Total Credits:         GBP {float(m.get('total_in') or 0):,.2f}  (avg GBP {float(m.get('avg_in') or 0):,.2f}; largest GBP {float(m.get('max_in') or 0):,.2f})")
+    out.append(f"   Total Debits:          GBP {float(m.get('total_out') or 0):,.2f}  (avg GBP {float(m.get('avg_out') or 0):,.2f}; largest GBP {float(m.get('max_out') or 0):,.2f})")
+    n_cpty = int(m.get("n_counterparties") or 0)
+    if n_cpty > 0:
+        out.append(f"   Unique Counterparties: {n_cpty:,}")
+    n_countries = int(m.get("n_countries") or 0)
+    if n_countries > 0:
+        country_codes = list((m.get("country_breakdown") or {}).keys())
+        out.append(f"   Distinct Countries:    {n_countries} ({', '.join(country_codes[:10])})")
+    out.append("")
 
-    if income_line: lines.append(income_line)
-    if spend_line:  lines.append(spend_line)
-    if alignment_line: lines.append(alignment_line)
+    # --- 3. Cash Activity ---
+    out.append("3. CASH ACTIVITY")
+    ci, co = float(m.get("cash_in") or 0), float(m.get("cash_out") or 0)
+    if ci == 0 and co == 0:
+        out.append("   No cash usage recorded during the review period.")
+    else:
+        out.append(f"   Cash Deposits:     GBP {ci:,.2f}")
+        out.append(f"   Cash Withdrawals:  GBP {co:,.2f}")
+    out.append("")
 
-    # Alerts (merged prohibited-country wording if applicable)
-    alerts_line = _alerts_sentence()
-    lines.append(alerts_line)
+    # --- 4. Overseas & High-Risk Activity ---
+    out.append("4. OVERSEAS & HIGH-RISK ACTIVITY")
+    ov = float(m.get("overseas") or 0)
+    hr = float(m.get("hr_val") or 0)
+    if ov == 0:
+        out.append("   No overseas transactions recorded during the review period.")
+    else:
+        out.append(f"   Overseas Activity:   {float(m.get('overseas_pct') or 0):.1f}% of total value (GBP {ov:,.2f})")
+    if hr == 0:
+        out.append("   No transactions through high-risk or prohibited corridors.")
+    else:
+        out.append(f"   High-Risk Corridors: {float(m.get('hr_pct') or 0):.1f}% of total value (GBP {hr:,.2f})")
+    # Country breakdown
+    cbd = m.get("country_breakdown") or {}
+    non_gb = {k: v for k, v in cbd.items() if k.upper() != "GB"}
+    if non_gb:
+        out.append("   Country Breakdown (non-GB):")
+        for iso2, info in sorted(non_gb.items(), key=lambda x: x[1]["total_amount"], reverse=True):
+            cn = country_full_name(iso2)
+            out.append(f"     - {cn} ({iso2}): {info['count']} transaction(s), GBP {info['total_amount']:,.2f}")
+    out.append("")
 
-    # If truly no alerts, add the "no anomalies" wrap-up
+    # --- 5. Profile Alignment ---
+    out.append("5. PROFILE ALIGNMENT")
+    has_profile_data = False
+    if est_income and est_income > 0:
+        diff_pct = ((avg_monthly_in - est_income) / est_income) * 100
+        if abs(diff_pct) <= 20: stance = "In line with estimate"
+        elif diff_pct > 0: stance = f"Above estimate by {abs(diff_pct):.0f}%"
+        else: stance = f"Below estimate by {abs(diff_pct):.0f}%"
+        out.append(f"   Estimated Monthly Income:       GBP {est_income:,.0f}")
+        out.append(f"   Actual Average Monthly Income:   GBP {avg_monthly_in:,.0f}")
+        out.append(f"   Assessment: {stance}")
+        out.append("")
+        has_profile_data = True
+
+    if est_expenditure and est_expenditure > 0:
+        diff_pct = ((avg_monthly_out - est_expenditure) / est_expenditure) * 100
+        if abs(diff_pct) <= 20: stance = "In line with estimate"
+        elif diff_pct > 0: stance = f"Above estimate by {abs(diff_pct):.0f}%"
+        else: stance = f"Below estimate by {abs(diff_pct):.0f}%"
+        out.append(f"   Estimated Monthly Expenditure:       GBP {est_expenditure:,.0f}")
+        out.append(f"   Actual Average Monthly Expenditure:   GBP {avg_monthly_out:,.0f}")
+        out.append(f"   Assessment: {stance}")
+        out.append("")
+        has_profile_data = True
+
+    if not is_individual:
+        al = _alignment_phrase()
+        if al:
+            out.append(f"   Business Alignment:")
+            out.append(al)
+            has_profile_data = True
+
+    if not has_profile_data:
+        out.append("   No estimated income/expenditure provided for comparison.")
+    out.append("")
+
+    # --- 6. Alerts & Findings ---
+    out.append("6. ALERTS & FINDINGS")
     tags = dict(m.get("tag_counter") or {})
     if not tags:
-        lines.append("No material anomalies were identified in the period reviewed; activity appears consistent with the overall profile.")
+        out.append("   No alerts were noted during the review period.")
+        out.append("   Activity appears consistent with the overall profile; no material anomalies identified.")
+    else:
+        total_alert_txns = sum(tags.values())
+        out.append(f"   Total: {len(tags)} alert type(s) fired across {total_alert_txns} transaction(s).")
+        out.append("")
+        sub_idx = ord('a')
+        for tag_name in sorted(tags.keys(), key=lambda t: tags[t], reverse=True):
+            nice = tag_name.replace("_", " ").title()
+            out.append(f"   {chr(sub_idx)}. {nice}")
+            detail = _alert_detail_for_tag(tag_name, tags[tag_name])
+            out.extend(detail)
+            out.append("")
+            sub_idx += 1
+    out.append("")
 
-    # Add outreach status summary - count answered vs outstanding questions
+    # --- 7. Outreach Status ---
+    out.append("7. OUTREACH STATUS")
     if answers:
-        total_questions = len(answers)
-        answered_count = sum(1 for r in answers if (r.get("answer") or "").strip())
-        outstanding_count = total_questions - answered_count
-        
-        if outstanding_count > 0 and answered_count > 0:
-            lines.append(f"Outreach status: {answered_count} of {total_questions} question(s) answered; {outstanding_count} response(s) still outstanding.")
-        elif outstanding_count > 0 and answered_count == 0:
-            lines.append(f"Outreach status: {total_questions} question(s) sent; all responses currently outstanding.")
-        elif outstanding_count == 0:
-            lines.append(f"Outreach status: All {total_questions} question(s) have been answered.")
-        
-        # Add full Q&A section for auditability - reviewers see exactly what was asked and answered
-        qa_section = _outreach_questions_and_responses_section()
-        if qa_section:
-            lines.append(qa_section)
+        total_q = len(answers)
+        nr_count = sum(1 for r in answers if r.get("not_required"))
+        active_answers = [r for r in answers if not r.get("not_required")]
+        answered = sum(1 for r in active_answers if (r.get("answer") or "").strip())
+        outstanding = len(active_answers) - answered
+        out.append(f"   Questions Sent:          {total_q}")
+        if nr_count:
+            out.append(f"   Excluded (Not Required): {nr_count}")
+        out.append(f"   Responses Received:      {answered} of {len(active_answers)}")
+        if outstanding > 0:
+            out.append(f"   Responses Outstanding:   {outstanding}")
+        out.append(f"   Assessment: {outreach_tone}")
+    else:
+        out.append("   No outreach questions have been prepared for this customer.")
+    out.append("")
 
-    return "\n".join(lines)
+    # --- 8. Outreach Q&A ---
+    if answers:
+        out.append("8. OUTREACH QUESTIONS & RESPONSES")
+        for idx, r in enumerate(answers, 1):
+            q = (r.get("question") or "").strip()
+            tag = (r.get("tag") or "").upper()
+            tag_nice = tag.replace("_", " ").title() if tag else "General"
+            out.append(f"   Q{idx} ({tag_nice}): {q}")
+            if r.get("not_required"):
+                nr_rationale = (r.get("not_required_rationale") or "").strip()
+                out.append(f"   A{idx}: [Not Required — excluded from outreach] Rationale: {nr_rationale or 'No rationale provided'}")
+            else:
+                ans = (r.get("answer") or "").strip()
+                if ans:
+                    doc = _doc_status(ans)
+                    out.append(f"   A{idx}: {ans}{' [' + doc + ']' if doc else ''}")
+                else:
+                    out.append(f"   A{idx}: [No response received]")
+            out.append("")
+
+    # --- 9. Risk Assessment Conclusion ---
+    section_num = 9 if answers else 8
+    out.append(f"{section_num}. RISK ASSESSMENT CONCLUSION")
+    conclusion_parts = []
+    if not tags:
+        conclusion_parts.append("No alert types were identified during the review period.")
+        conclusion_parts.append("Transaction activity appears consistent with the declared profile.")
+    else:
+        conclusion_parts.append(f"{len(tags)} alert type(s) were identified across {sum(tags.values())} transaction(s).")
+        if "PROHIBITED_COUNTRY" in tags:
+            conclusion_parts.append("Transactions to prohibited jurisdictions require escalation and further review.")
+        if answers:
+            active_for_conclusion = [r for r in answers if not r.get("not_required")]
+            answered = sum(1 for r in active_for_conclusion if (r.get("answer") or "").strip())
+            if answered == len(active_for_conclusion):
+                conclusion_parts.append("Customer outreach is complete; all questions have been answered.")
+            elif answered > 0:
+                conclusion_parts.append(f"Customer outreach is partially complete ({answered} of {len(active_for_conclusion)} responses received).")
+            else:
+                conclusion_parts.append("Customer outreach responses are currently outstanding.")
+        conclusion_parts.append(outreach_tone)
+
+    # Profile alignment conclusion
+    if est_income and est_income > 0:
+        in_diff = abs(((avg_monthly_in - est_income) / est_income) * 100)
+        out_diff = abs(((avg_monthly_out - (est_expenditure or 0)) / max(est_expenditure or 1, 1)) * 100) if est_expenditure else 0
+        if in_diff <= 20 and out_diff <= 20:
+            conclusion_parts.append("Transaction volumes are broadly consistent with declared expectations.")
+        else:
+            conclusion_parts.append("Transaction volumes show deviation from declared expectations; further review recommended.")
+
+    for cp in conclusion_parts:
+        out.append(f"   {cp}")
+    out.append("")
+    out.append("=" * 80)
+
+    return "\n".join(out)
 
 from flask import session
 
@@ -6037,10 +7134,14 @@ def ai_rationale():
     # Always read from values (works for both GET & POST)
     customer_id = (request.values.get("customer_id") or "").strip() or None
     period      = (request.values.get("period") or "all").strip()
+    entity_type = (request.values.get("entity_type") or "company").strip()
+    if entity_type not in ("company", "individual"):
+        entity_type = "company"
 
     # Blank state: require a customer to be selected
     if not customer_id:
         return render_template("ai_rationale.html", customer_id=None, period=period,
+                               entity_type="company",
                                metrics=None, nature_of_business="", est_income="",
                                est_expenditure="", rationale_text=None,
                                answers_preview=[], no_customer=True)
@@ -6066,6 +7167,64 @@ def ai_rationale():
     est_income_num = _to_float_or_none(est_income)
     est_expenditure_num = _to_float_or_none(est_expenditure)
 
+    # POST: reviewer confirmation (AGRA pen test - rationale sign-off audit trail)
+    if request.method == "POST" and action == "confirm_review" and customer_id:
+        confirmed = request.form.get("reviewer_confirmed") == "1"
+        confirmed_type = request.form.get("confirmed_type", "consistent")
+        db = get_db()
+        user = get_current_user()
+        if confirmed:
+            db.execute("""
+                UPDATE ai_rationales SET reviewer_confirmed=TRUE, reviewer_confirmed_by=%s,
+                    reviewer_confirmed_at=CURRENT_TIMESTAMP, reviewer_confirmed_type=%s,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE customer_id=%s AND COALESCE(period_from,'')=COALESCE(%s,'') AND COALESCE(period_to,'')=COALESCE(%s,'')
+            """, (user.get("username") if user else "Unknown", confirmed_type, customer_id, p_from, p_to))
+        else:
+            db.execute("""
+                UPDATE ai_rationales SET reviewer_confirmed=FALSE, reviewer_confirmed_by=NULL,
+                    reviewer_confirmed_at=NULL, reviewer_confirmed_type=NULL,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE customer_id=%s AND COALESCE(period_from,'')=COALESCE(%s,'') AND COALESCE(period_to,'')=COALESCE(%s,'')
+            """, (customer_id, p_from, p_to))
+        db.commit()
+        log_audit_event(
+            event_type="REVIEWER_CONFIRMATION",
+            user_id=user["id"] if user else None,
+            username=user.get("username") if user else None,
+            details=json.dumps({"customer_id": customer_id, "confirmed": confirmed, "type": confirmed_type if confirmed else None}),
+        )
+        flash("Reviewer confirmation updated." if confirmed else "Reviewer confirmation removed.")
+        return redirect(url_for("ai_rationale", customer_id=customer_id, period=period))
+
+    # POST: save manual edits to rationale text with audit trail
+    if request.method == "POST" and action == "save_edit" and customer_id:
+        edited_text = request.form.get("rationale_text", "")
+        existing = _load_rationale_row(customer_id, p_from, p_to)
+        old_text = existing["rationale_text"] if existing else ""
+        if edited_text != old_text:
+            db = get_db()
+            db.execute("""
+                UPDATE ai_rationales SET rationale_text=%s, updated_at=CURRENT_TIMESTAMP
+                WHERE customer_id=%s AND COALESCE(period_from,'')=COALESCE(%s,'') AND COALESCE(period_to,'')=COALESCE(%s,'')
+            """, (edited_text, customer_id, p_from, p_to))
+            db.commit()
+            user = get_current_user()
+            log_audit_event(
+                event_type="RATIONALE_EDIT",
+                user_id=user["id"] if user else None,
+                username=user.get("username") if user else None,
+                details=json.dumps({
+                    "customer_id": customer_id,
+                    "period_from": p_from,
+                    "period_to": p_to,
+                    "before": old_text,
+                    "after": edited_text,
+                }),
+            )
+            flash("Rationale saved.")
+        return redirect(url_for("ai_rationale", customer_id=customer_id, period=period))
+
     # POST: generate + persist, then PRG redirect to avoid resubmits
     if request.method == "POST" and action == "generate" and customer_id:
         metrics = _customer_metrics(customer_id, p_from, p_to)
@@ -6073,6 +7232,7 @@ def ai_rationale():
             customer_id=customer_id,
             p_from=p_from,
             p_to=p_to,
+            entity_type=entity_type,
             nature_of_business=nature_of_business,
             est_income=est_income_num,
             est_expenditure=est_expenditure_num,
@@ -6081,6 +7241,7 @@ def ai_rationale():
             customer_id=customer_id,
             p_from=p_from,
             p_to=p_to,
+            entity_type=entity_type,
             nature_of_business=nature_of_business,
             est_income=est_income_num,
             est_expenditure=est_expenditure_num,
@@ -6090,6 +7251,10 @@ def ai_rationale():
         return redirect(url_for("ai_rationale", customer_id=customer_id, period=period))
 
     # GET: load saved state if we have a customer
+    reviewer_confirmed = False
+    reviewer_confirmed_by = None
+    reviewer_confirmed_at = None
+    reviewer_confirmed_type = None
     if customer_id:
         metrics = _customer_metrics(customer_id, p_from, p_to)
         row = _load_rationale_row(customer_id, p_from, p_to)
@@ -6101,18 +7266,30 @@ def ai_rationale():
                 est_income = "" if row["est_income"] is None else str(int(row["est_income"]))
             if est_expenditure == "":
                 est_expenditure = "" if row["est_expenditure"] is None else str(int(row["est_expenditure"]))
+            # Load saved entity_type if not explicitly set via query param
+            if not request.values.get("entity_type") and row.get("entity_type"):
+                entity_type = row["entity_type"]
+            reviewer_confirmed = bool(row.get("reviewer_confirmed"))
+            reviewer_confirmed_by = row.get("reviewer_confirmed_by")
+            reviewer_confirmed_at = row.get("reviewer_confirmed_at")
+            reviewer_confirmed_type = row.get("reviewer_confirmed_type")
         case, answers_preview = _answers_summary(customer_id)
 
     return render_template(
         "ai_rationale.html",
         customer_id=customer_id,
         period=period,
+        entity_type=entity_type,
         metrics=metrics,
         nature_of_business=nature_of_business or "",
         est_income=est_income or "",
         est_expenditure=est_expenditure or "",
         rationale_text=rationale_text,
         answers_preview=answers_preview,
+        reviewer_confirmed=reviewer_confirmed,
+        reviewer_confirmed_by=reviewer_confirmed_by or "",
+        reviewer_confirmed_at=reviewer_confirmed_at,
+        reviewer_confirmed_type=reviewer_confirmed_type or "",
     )
 
 @app.route("/explore")
@@ -6122,6 +7299,7 @@ def explore():
     customer_id = request.args.get("customer_id","").strip()
     direction = request.args.get("direction","").strip()
     channel = request.args.get("channel","").strip()
+    account = request.args.get("account","").strip()
     risk_param = request.args.get("risk","").strip()   # e.g. "HIGH,HIGH_3RD,PROHIBITED" or "HIGH"
     date_from = request.args.get("date_from","").strip()
     date_to = request.args.get("date_to","").strip()
@@ -6129,12 +7307,14 @@ def explore():
 
     # Blank state: require a customer to be selected
     if not customer_id:
-        return render_template("explore.html", rows=[], channels=[], no_customer=True)
+        return render_template("explore.html", rows=[], channels=[], accounts=[], no_customer=True)
 
     where, params = [], []
     join_risk = False
 
     where.append("t.customer_id = ?"); params.append(customer_id)
+    if account:
+        where.append("t.account_name = ?"); params.append(account)
     if direction in ("in","out"):
         where.append("t.direction = ?"); params.append(direction)
     if channel:
@@ -6160,7 +7340,8 @@ def explore():
 
     sql = f"""
       SELECT t.id, t.txn_date, t.customer_id, t.direction, t.base_amount, t.currency,
-             t.country_iso2, t.channel, t.payer_sort_code, t.payee_sort_code, t.narrative
+             t.country_iso2, t.channel, t.payer_sort_code, t.payee_sort_code, t.narrative,
+             t.account_name
       FROM transactions t
       {join_clause}
       {where_clause}
@@ -6203,7 +7384,8 @@ def explore():
     ch_rows = db.execute("SELECT DISTINCT lower(COALESCE(channel,'')) as ch FROM transactions ORDER BY ch").fetchall()
     channels = [r["ch"] for r in ch_rows if r["ch"]]
 
-    return render_template("explore.html", rows=recs, channels=channels)
+    return render_template("explore.html", rows=recs, channels=channels,
+                           accounts=_get_accounts_for_customer(customer_id))
 
 # ------- Rules table utilities (safe to add near other helpers) -------
 def ensure_rules_table():
@@ -6440,13 +7622,62 @@ def _customer_metrics(customer_id: str, p_from: Optional[str], p_to: Optional[st
     exp_in  = float(kyc["expected_monthly_in"]  or 0.0) if kyc else 0.0
     exp_out = float(kyc["expected_monthly_out"] or 0.0) if kyc else 0.0
 
+    # Enhanced metrics
+    n_total = n_in + n_out
+
+    # Distinct counterparties
+    cpty_row = db.execute(f"""
+        SELECT COUNT(DISTINCT counterparty_account_no) AS n
+        FROM transactions {where}
+        AND counterparty_account_no IS NOT NULL AND counterparty_account_no != ''
+    """, params).fetchone()
+    n_counterparties = int(cpty_row["n"] or 0)
+
+    # Country breakdown
+    country_rows = db.execute(f"""
+        SELECT country_iso2, COUNT(*) AS cnt, SUM(base_amount) AS total_amt
+        FROM transactions {where}
+        AND COALESCE(country_iso2, '') != ''
+        GROUP BY country_iso2
+        ORDER BY total_amt DESC
+    """, params).fetchall()
+    n_countries = len(country_rows)
+    country_breakdown = {
+        r["country_iso2"]: {"count": int(r["cnt"]), "total_amount": float(r["total_amt"] or 0)}
+        for r in country_rows
+    }
+
+    # Distinct accounts
+    acct_rows = db.execute(f"""
+        SELECT DISTINCT account_name FROM transactions {where}
+        AND account_name IS NOT NULL AND account_name != ''
+        ORDER BY account_name
+    """, params).fetchall()
+    account_names = [r["account_name"] for r in acct_rows]
+    n_accounts = len(account_names)
+
+    # Period months
+    period_months = 1
+    if p_from and p_to:
+        try:
+            d1 = date.fromisoformat(p_from)
+            d2 = date.fromisoformat(p_to)
+            period_months = max(1, round((d2 - d1).days / 30))
+        except Exception:
+            pass
+
     return {
         "total_in": total_in, "total_out": total_out,
-        "n_in": n_in, "n_out": n_out, "avg_in": avg_in, "avg_out": avg_out,
+        "n_in": n_in, "n_out": n_out, "n_total": n_total,
+        "avg_in": avg_in, "avg_out": avg_out,
         "max_in": max_in, "max_out": max_out,
         "cash_in": cash_in, "cash_out": cash_out,
         "overseas": overseas, "overseas_pct": overseas_pct,
         "hr_val": hr_val, "hr_pct": hr_pct,
+        "n_counterparties": n_counterparties,
+        "n_countries": n_countries, "country_breakdown": country_breakdown,
+        "n_accounts": n_accounts, "account_names": account_names,
+        "period_months": period_months,
         "alerts": [dict(a) for a in alerts],
         "tag_counter": tag_counter,
         "expected_in": exp_in, "expected_out": exp_out,
@@ -6455,7 +7686,7 @@ def _customer_metrics(customer_id: str, p_from: Optional[str], p_to: Optional[st
 
 def _answers_summary(customer_id: str):
     """
-    Pull latest AI case answers and summarise whether they’re answered.
+    Pull latest AI case answers and summarise whether they're answered.
     """
     db = get_db()
     case = db.execute(
@@ -6660,9 +7891,12 @@ def admin_wipe():
     n_tx = db.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"]
     n_alerts = db.execute("SELECT COUNT(*) c FROM alerts").fetchone()["c"]
 
+    n_stmts = db.execute("SELECT COUNT(*) c FROM statements").fetchone()["c"]
+
     # Delete dependents first
     db.execute("DELETE FROM alerts;")
     db.execute("DELETE FROM transactions;")
+    db.execute("DELETE FROM statements;")
 
     # Optional: clear AI working tables if you like
     try:
@@ -6677,7 +7911,7 @@ def admin_wipe():
     except psycopg2.Error:
         pass
 
-    flash(f"Wiped {n_tx} transactions and {n_alerts} alerts. Any AI cases/answers were cleared.")
+    flash(f"Wiped {n_tx} transactions, {n_alerts} alerts, and {n_stmts} statements. Any AI cases/answers were cleared.")
     return redirect(url_for("admin") + "#danger")
 
 @app.route("/sample/<path:name>")
@@ -6686,6 +7920,7 @@ def download_sample(name):
 
 
 # --- PDF Report Generation ---
+from xml.sax.saxutils import escape as xml_escape
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -6792,11 +8027,18 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
             return 'N/A'
         try:
             from datetime import date as date_type
-            if isinstance(d, (datetime, date_type)):
+            if isinstance(d, datetime):
+                if d.hour == 0 and d.minute == 0 and d.second == 0:
+                    return d.strftime('%d/%m/%Y')
+                return d.strftime('%d/%m/%Y %H:%M')
+            if isinstance(d, date_type):
                 return d.strftime('%d/%m/%Y')
-            dt = datetime.strptime(str(d)[:10], '%Y-%m-%d')
-            return dt.strftime('%d/%m/%Y')
-        except:
+            s = str(d)
+            dt = datetime.fromisoformat(s) if 'T' in s or len(s) > 10 else datetime.strptime(s[:10], '%Y-%m-%d')
+            if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+                return dt.strftime('%d/%m/%Y')
+            return dt.strftime('%d/%m/%Y %H:%M')
+        except Exception:
             return str(d)
 
     review_date = datetime.now().strftime('%d/%m/%Y %H:%M')
@@ -6829,9 +8071,10 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
     
     # Get rationale data for nature of business and estimates
     rationale_row = db.execute("""
-        SELECT nature_of_business, est_income, est_expenditure 
-        FROM ai_rationales 
-        WHERE customer_id = ? 
+        SELECT nature_of_business, est_income, est_expenditure,
+               reviewer_confirmed, reviewer_confirmed_by, reviewer_confirmed_at, reviewer_confirmed_type
+        FROM ai_rationales
+        WHERE customer_id = ?
         ORDER BY updated_at DESC LIMIT 1
     """, (customer_id,)).fetchone()
     
@@ -6882,18 +8125,18 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
             AVG(CASE WHEN direction='out' THEN base_amount END) as avg_out,
             MAX(CASE WHEN direction='in' THEN base_amount END) as max_in,
             MAX(CASE WHEN direction='out' THEN base_amount END) as max_out,
-            SUM(CASE WHEN direction='in' AND channel='cash' THEN base_amount ELSE 0 END) as cash_in,
-            SUM(CASE WHEN direction='out' AND channel='cash' THEN base_amount ELSE 0 END) as cash_out,
+            SUM(CASE WHEN direction='in' AND lower(COALESCE(channel,''))='cash' THEN base_amount ELSE 0 END) as cash_in,
+            SUM(CASE WHEN direction='out' AND lower(COALESCE(channel,''))='cash' THEN base_amount ELSE 0 END) as cash_out,
             SUM(CASE WHEN country_iso2 IS NOT NULL AND country_iso2 != '' AND country_iso2 != 'GB' THEN base_amount ELSE 0 END) as overseas
         FROM transactions WHERE customer_id = ?
     """, (customer_id,)).fetchone()
-    
+
     total_in = float(metrics['total_in'] or 0)
     total_out = float(metrics['total_out'] or 0)
     total_value = total_in + total_out
     overseas = float(metrics['overseas'] or 0)
     overseas_pct = (overseas / total_value * 100) if total_value > 0 else 0
-    
+
     # High-risk value
     hr_row = db.execute("""
         SELECT COALESCE(SUM(t.base_amount), 0) as hr_val
@@ -6977,7 +8220,7 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
             tags = json.loads(row['rule_tags']) if row['rule_tags'] else []
             for tag in tags:
                 tag_counts[tag] += 1
-        except:
+        except Exception:
             pass
     
     total_alerts = sum(r['cnt'] for r in severity_counts)
@@ -7035,28 +8278,39 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
     
     if case:
         answers = db.execute("""
-            SELECT tag, question, answer FROM ai_answers WHERE case_id = ? ORDER BY id
+            SELECT tag, question, answer, not_required, not_required_rationale
+            FROM ai_answers WHERE case_id = ? ORDER BY id
         """, (case['id'],)).fetchall()
-        
+
         if answers:
-            answered = sum(1 for a in answers if (a['answer'] or '').strip())
-            outstanding = len(answers) - answered
-            
-            elements.append(Paragraph(f"Questions Sent: {len(answers)} | Answered: {answered} | Outstanding: {outstanding}", styles['BodyTextJustified']))
+            answered = sum(1 for a in answers if (a['answer'] or '').strip() and not a.get('not_required'))
+            not_req = sum(1 for a in answers if a.get('not_required'))
+            active = [a for a in answers if not a.get('not_required')]
+            outstanding = len(active) - answered
+
+            elements.append(Paragraph(
+                f"Questions Prepared: {len(answers)} | Answered: {answered} | Not Required: {not_req} | Outstanding: {outstanding}",
+                styles['BodyTextJustified']))
             elements.append(Spacer(1, 2*mm))
-            
+
             for idx, ans in enumerate(answers, 1):
-                tag = (ans['tag'] or '').replace('_', ' ').title()
-                question = ans['question'] or ''
+                tag = xml_escape((ans['tag'] or '').replace('_', ' ').title())
+                question = xml_escape(ans['question'] or '')
                 answer = ans['answer'] or ''
-                
+
                 elements.append(Paragraph(f"<b>Q{idx} ({tag}):</b> {question}", styles['BodyTextJustified']))
-                
-                if answer.strip():
-                    elements.append(Paragraph(f"<b>A{idx}:</b> {answer}", styles['BodyTextJustified']))
+
+                if ans.get('not_required'):
+                    nr_rationale = xml_escape((ans.get('not_required_rationale') or '').strip())
+                    nr_text = f"<b>A{idx}:</b> <i>[Not Required]</i>"
+                    if nr_rationale:
+                        nr_text += f" — Rationale: <i>{nr_rationale}</i>"
+                    elements.append(Paragraph(nr_text, styles['SmallText']))
+                elif answer.strip():
+                    elements.append(Paragraph(f"<b>A{idx}:</b> {xml_escape(answer)}", styles['BodyTextJustified']))
                 else:
                     elements.append(Paragraph(f"<b>A{idx}:</b> <i>[No response received]</i>", styles['SmallText']))
-                
+
                 elements.append(Spacer(1, 2*mm))
         else:
             elements.append(Paragraph("No outreach questions have been sent for this customer.", styles['BodyTextJustified']))
@@ -7065,9 +8319,57 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
     
     elements.append(Spacer(1, 4*mm))
     
-    # --- Section 6: Summary Comments ---
-    elements.append(Paragraph("6. REVIEWER COMMENTS & CONCLUSION", styles['SectionHeader']))
-    
+    # --- Section 6: Reviewer Confirmation ---
+    elements.append(Paragraph("6. REVIEWER CONFIRMATION", styles['SectionHeader']))
+
+    reviewer_confirmed = bool(safe_get(rationale_row, 'reviewer_confirmed')) if rationale_row else False
+    reviewer_confirmed_type = (safe_get(rationale_row, 'reviewer_confirmed_type') or 'consistent') if rationale_row else 'consistent'
+    if reviewer_confirmed:
+        confirmed_by = safe_get(rationale_row, 'reviewer_confirmed_by') or 'Unknown'
+        confirmed_at = safe_get(rationale_row, 'reviewer_confirmed_at')
+        confirmed_date_str = 'N/A'
+        if confirmed_at:
+            try:
+                if isinstance(confirmed_at, str):
+                    confirmed_at = datetime.strptime(confirmed_at[:19], '%Y-%m-%d %H:%M:%S')
+                confirmed_date_str = confirmed_at.strftime('%d/%m/%Y at %H:%M')
+            except Exception:
+                confirmed_date_str = str(confirmed_at)
+
+        if reviewer_confirmed_type == 'inconsistent':
+            confirm_text = 'Customer activity appears inconsistent with the customer profile'
+            confirm_color = colors.HexColor('#dc3545')
+        else:
+            confirm_text = 'Customer activity is consistent with the customer profile'
+            confirm_color = colors.HexColor('#198754')
+
+        confirm_data = [
+            ['Confirmation:', confirm_text],
+            ['Confirmed By:', confirmed_by],
+            ['Confirmed Date:', confirmed_date_str],
+        ]
+        confirm_table = Table(confirm_data, colWidths=[100, 340])
+        confirm_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('TEXTCOLOR', (0, 0), (0, -1), colors.HexColor('#4a5568')),
+            ('TEXTCOLOR', (1, 0), (1, 0), confirm_color),
+            ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ]))
+        elements.append(confirm_table)
+    else:
+        elements.append(Paragraph(
+            "<i>Reviewer has not yet confirmed whether customer activity is consistent with the customer profile.</i>",
+            styles['SmallText']))
+
+    elements.append(Spacer(1, 4*mm))
+
+    # --- Section 7: Summary Comments ---
+    elements.append(Paragraph("7. REVIEWER COMMENTS & CONCLUSION", styles['SectionHeader']))
+
     if summary_comments and summary_comments.strip():
         elements.append(Paragraph(summary_comments, styles['BodyTextJustified']))
     else:
@@ -7106,11 +8408,16 @@ def generate_pdf_report(customer_id):
     summary_comments = request.form.get('summary_comments', '') if request.method == 'POST' else ''
     
     # Generate the PDF
-    pdf_bytes = _generate_customer_report_pdf(customer_id, reviewer_name, summary_comments)
-    
+    try:
+        pdf_bytes = _generate_customer_report_pdf(customer_id, reviewer_name, summary_comments)
+    except Exception as e:
+        app.logger.error("PDF generation failed for %s: %s", customer_id, e)
+        flash("Failed to generate PDF report. Please try again.", "danger")
+        return redirect(url_for('report_preview', customer_id=customer_id))
+
     # Create filename
-    filename = f"Transaction_Review_{customer_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    
+    filename = secure_filename(f"Transaction_Review_{customer_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+
     return Response(
         pdf_bytes,
         mimetype='application/pdf',
@@ -7139,11 +8446,18 @@ def report_preview(customer_id):
             return 'N/A'
         try:
             from datetime import date as date_type
-            if isinstance(d, (datetime, date_type)):
+            if isinstance(d, datetime):
+                if d.hour == 0 and d.minute == 0 and d.second == 0:
+                    return d.strftime('%d/%m/%Y')
+                return d.strftime('%d/%m/%Y %H:%M')
+            if isinstance(d, date_type):
                 return d.strftime('%d/%m/%Y')
-            dt = datetime.strptime(str(d)[:10], '%Y-%m-%d')
-            return dt.strftime('%d/%m/%Y')
-        except:
+            s = str(d)
+            dt = datetime.fromisoformat(s) if 'T' in s or len(s) > 10 else datetime.strptime(s[:10], '%Y-%m-%d')
+            if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+                return dt.strftime('%d/%m/%Y')
+            return dt.strftime('%d/%m/%Y %H:%M')
+        except Exception:
             return str(d)
     
     # Get transaction date range
@@ -7157,13 +8471,17 @@ def report_preview(customer_id):
     
     # Get rationale data
     rationale = db.execute("""
-        SELECT nature_of_business, est_income, est_expenditure 
-        FROM ai_rationales WHERE customer_id = ? ORDER BY updated_at DESC LIMIT 1
+        SELECT * FROM ai_rationales WHERE customer_id = ? ORDER BY updated_at DESC LIMIT 1
     """, (customer_id,)).fetchone()
-    
+
     nature_of_business = safe_get(rationale, 'nature_of_business') or safe_get(kyc, 'nature_of_business', 'Not specified')
     est_income = safe_get(rationale, 'est_income') or safe_get(kyc, 'expected_monthly_in')
     est_expenditure = safe_get(rationale, 'est_expenditure') or safe_get(kyc, 'expected_monthly_out')
+    rationale_text = safe_get(rationale, 'rationale_text', '')
+    reviewer_confirmed = safe_get(rationale, 'reviewer_confirmed', 0)
+    reviewer_confirmed_by = safe_get(rationale, 'reviewer_confirmed_by', '')
+    reviewer_confirmed_at = safe_get(rationale, 'reviewer_confirmed_at', '')
+    reviewer_confirmed_type = safe_get(rationale, 'reviewer_confirmed_type', '')
     
     # Calculate metrics
     metrics = db.execute("""
@@ -7175,8 +8493,8 @@ def report_preview(customer_id):
             AVG(CASE WHEN direction='out' THEN base_amount END) as avg_out,
             MAX(CASE WHEN direction='in' THEN base_amount END) as max_in,
             MAX(CASE WHEN direction='out' THEN base_amount END) as max_out,
-            SUM(CASE WHEN direction='in' AND channel='cash' THEN base_amount ELSE 0 END) as cash_in,
-            SUM(CASE WHEN direction='out' AND channel='cash' THEN base_amount ELSE 0 END) as cash_out,
+            SUM(CASE WHEN direction='in' AND lower(COALESCE(channel,''))='cash' THEN base_amount ELSE 0 END) as cash_in,
+            SUM(CASE WHEN direction='out' AND lower(COALESCE(channel,''))='cash' THEN base_amount ELSE 0 END) as cash_out,
             SUM(CASE WHEN country_iso2 IS NOT NULL AND country_iso2 != '' AND country_iso2 != 'GB' THEN base_amount ELSE 0 END) as overseas,
             COUNT(CASE WHEN direction='in' THEN 1 END) as count_in,
             COUNT(CASE WHEN direction='out' THEN 1 END) as count_out
@@ -7215,7 +8533,7 @@ def report_preview(customer_id):
             tags = json.loads(row['rule_tags']) if row['rule_tags'] else []
             for tag in tags:
                 tag_counts[tag] += 1
-        except:
+        except Exception:
             pass
     
     total_alerts = sum(r['cnt'] for r in severity_counts)
@@ -7228,13 +8546,16 @@ def report_preview(customer_id):
     answers = []
     if case:
         answers = db.execute("""
-            SELECT tag, question, answer FROM ai_answers WHERE case_id = ? ORDER BY id
+            SELECT tag, question, answer, not_required, not_required_rationale
+            FROM ai_answers WHERE case_id = ? ORDER BY id
         """, (case['id'],)).fetchall()
-    
-    answered_count = sum(1 for a in answers if (a['answer'] or '').strip()) if answers else 0
-    
+
+    answered_count = sum(1 for a in answers if (a['answer'] or '').strip() and not a.get('not_required')) if answers else 0
+    not_required_count = sum(1 for a in answers if a.get('not_required')) if answers else 0
+    active_answers = [a for a in answers if not a.get('not_required')]
+
     reviewer_name = session.get('username', 'Unknown')
-    
+
     return render_template('report_preview.html',
         customer_id=customer_id,
         reviewer_name=reviewer_name,
@@ -7271,7 +8592,14 @@ def report_preview(customer_id):
         # Outreach
         answers=answers,
         answered_count=answered_count,
-        outstanding_count=len(answers) - answered_count if answers else 0,
+        not_required_count=not_required_count,
+        outstanding_count=len(active_answers) - answered_count if active_answers else 0,
+        # Rationale
+        rationale_text=rationale_text,
+        reviewer_confirmed=reviewer_confirmed,
+        reviewer_confirmed_by=reviewer_confirmed_by,
+        reviewer_confirmed_at=reviewer_confirmed_at,
+        reviewer_confirmed_type=reviewer_confirmed_type,
     )
 
 
