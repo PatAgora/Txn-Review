@@ -133,7 +133,7 @@ def _get_pool():
             if _db_pool is None:
                 _db_pool = psycopg2.pool.ThreadedConnectionPool(
                     minconn=4,
-                    maxconn=80,
+                    maxconn=150,
                     dsn=get_db_connection_string(),
                 )
     return _db_pool
@@ -585,7 +585,7 @@ def get_oauth2_access_token(tenant_id: str, client_id: str, client_secret: str) 
 _email_executor = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=3)
 
 # --- Background scoring executor ---------------------------------------------------
-_scoring_executor = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=2)
+_scoring_executor = __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=6)
 
 def _set_scoring_status(customer_id, status, msg=""):
     """Persist scoring status to the scoring_jobs table (DB-backed, cross-worker safe)."""
@@ -2193,7 +2193,7 @@ def _strip_json_fences(text):
     return s.strip()
 
 # Limit concurrent LLM calls to avoid API rate exhaustion
-_llm_semaphore = __import__('threading').Semaphore(5)
+_llm_semaphore = __import__('threading').Semaphore(10)
 _LLM_TIMEOUT = 20  # seconds
 
 def llm_enabled():
