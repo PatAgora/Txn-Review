@@ -53,26 +53,40 @@
     <span class="badge bg-secondary">{{ answers|length }} question(s)</span>
   </div>
   <div class="card-body">
-    <form method="post">
+    <form method="post" id="qaForm">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="customer_id" value="{{ customer_id or '' }}">
       <input type="hidden" name="period" value="all">
       <input type="hidden" name="case_id" value="{{ case.id }}">
       <input type="hidden" name="action" value="save">
-      
+
       {% for r in answers %}
       <div class="mb-4 pb-3 {% if not loop.last %}border-bottom{% endif %}">
         <div class="d-flex justify-content-between align-items-start mb-2">
           <strong>{{ loop.index }}. {{ r.question_nice or r.question }}</strong>
+          <div class="form-check ms-3">
+            <input class="form-check-input" type="checkbox" id="nr_check_{{ r.id }}"
+                   name="nr_{{ r.id }}" value="1"
+                   {% if r.not_required %}checked{% endif %}
+                   onchange="toggleNotRequired({{ r.id }}, this.checked)">
+            <label class="form-check-label small text-muted" for="nr_check_{{ r.id }}">Not Required</label>
+          </div>
         </div>
         <input type="hidden" name="qid" value="{{ r.id }}">
-        <textarea class="form-control" name="answer_{{ r.id }}" rows="3" 
-                  placeholder="Enter customer response or notes...">{{ r.answer or '' }}</textarea>
+        <textarea class="form-control mb-2" name="answer_{{ r.id }}" rows="3" id="answer_{{ r.id }}"
+                  placeholder="Enter customer response or notes..."
+                  {% if r.not_required %}disabled{% endif %}>{{ r.answer or '' }}</textarea>
+        <div class="mt-2 {% if not r.not_required %}d-none{% endif %}" id="nr_rationale_wrap_{{ r.id }}">
+          <label class="form-label small text-muted">Reason for exclusion <span class="text-danger">*</span></label>
+          <textarea class="form-control form-control-sm" name="nr_rationale_{{ r.id }}" rows="2"
+                    id="nr_rationale_{{ r.id }}"
+                    placeholder="Explain why this question is not required...">{{ r.not_required_rationale or '' }}</textarea>
+        </div>
       </div>
       {% endfor %}
-      
+
       <button type="submit" class="btn btn-success">
-        <i class="fas fa-save me-1"></i> Save Responses
+        <i class="bi bi-check-lg me-1"></i> Save Responses
       </button>
     </form>
   </div>
@@ -88,10 +102,46 @@
   <div class="card-header fw-semibold">Draft Outreach Email</div>
   <div class="card-body">
     <p class="text-muted small mb-2">Copy/paste into your email tool (or export later):</p>
-    <pre class="mb-0" class="u-prewrap">{{ outreach_text }}</pre>
+    <pre class="mb-0" style="white-space: pre-wrap;">{{ outreach_text }}</pre>
   </div>
 </div>
 {% endif %}
 
 {% endif %}
+
+<script>
+function toggleNotRequired(qid, checked) {
+  var answer = document.getElementById('answer_' + qid);
+  var wrap = document.getElementById('nr_rationale_wrap_' + qid);
+  if (checked) {
+    answer.disabled = true;
+    wrap.classList.remove('d-none');
+  } else {
+    answer.disabled = false;
+    wrap.classList.add('d-none');
+  }
+}
+
+// Validate: if Not Required is checked, rationale must be filled
+document.getElementById('qaForm').addEventListener('submit', function(e) {
+  var checks = document.querySelectorAll('[id^="nr_check_"]');
+  for (var i = 0; i < checks.length; i++) {
+    if (checks[i].checked) {
+      var qid = checks[i].id.replace('nr_check_', '');
+      var rat = document.getElementById('nr_rationale_' + qid);
+      if (rat && !rat.value.trim()) {
+        e.preventDefault();
+        alert('Please provide a rationale for excluding question ' + (i + 1) + '.');
+        rat.focus();
+        return;
+      }
+    }
+  }
+  // Re-enable disabled answer fields so values are submitted
+  var answers = document.querySelectorAll('textarea[disabled]');
+  for (var j = 0; j < answers.length; j++) {
+    answers[j].disabled = false;
+  }
+});
+</script>
 {% endblock %}

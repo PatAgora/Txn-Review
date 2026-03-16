@@ -14,19 +14,26 @@
     <div class="card-header fw-semibold">Analyst Inputs</div>
     <div class="card-body">
       <div class="row g-3">
-        <div class="col-12">
+        <div class="col-md-6">
+          <label class="form-label">Entity type</label>
+          <select class="form-select" name="entity_type" id="entityType" onchange="toggleNob()">
+            <option value="company" {% if entity_type == 'company' %}selected{% endif %}>Company</option>
+            <option value="individual" {% if entity_type == 'individual' %}selected{% endif %}>Individual</option>
+          </select>
+        </div>
+        <div class="col-md-6" id="nobWrap">
           <label class="form-label">Nature of business</label>
           <input type="text" class="form-control" name="nature_of_business"
                  placeholder="e.g., Building supplies"
                  value="{{ nature_of_business or '' }}">
         </div>
         <div class="col-md-6">
-          <label class="form-label">Estimated monthly income (£)</label>
+          <label class="form-label">Estimated monthly income (&pound;)</label>
           <input type="text" class="form-control" name="est_income" inputmode="decimal"
                  placeholder="e.g., 11000" value="{{ est_income or '' }}">
         </div>
         <div class="col-md-6">
-          <label class="form-label">Estimated monthly expenditure (£)</label>
+          <label class="form-label">Estimated monthly expenditure (&pound;)</label>
           <input type="text" class="form-control" name="est_expenditure" inputmode="decimal"
                  placeholder="e.g., 7500" value="{{ est_expenditure or '' }}">
         </div>
@@ -58,17 +65,88 @@
   </div>
   {% endif %}
 
-  <!-- Output -->
-  <div class="card">
-    <div class="card-header fw-semibold">Rationale Output</div>
+  <!-- Output (Editable) -->
+  <div class="card mb-3">
+    <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+      <span>Rationale Output</span>
+      {% if rationale_text %}
+        <span class="badge text-bg-info">Editable</span>
+      {% endif %}
+    </div>
     <div class="card-body">
       {% if rationale_text %}
-        <pre class="mb-0" id="rationaleOut" class="u-prewrap">{{ rationale_text }}</pre>
+        <form method="post" action="{{ url_for('ai_rationale') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="customer_id" value="{{ customer_id }}">
+          <input type="hidden" name="period" value="all">
+          <input type="hidden" name="action" value="save_edit">
+          <textarea class="form-control mb-3" name="rationale_text" rows="20" id="rationaleOut"
+                    style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">{{ rationale_text }}</textarea>
+          <button class="btn btn-primary btn-sm">
+            <i class="bi bi-floppy me-1"></i>Save Edits
+          </button>
+        </form>
       {% else %}
         <p class="text-muted mb-0">Fill in any analyst inputs above and click <strong>Generate Rationale</strong>.</p>
       {% endif %}
     </div>
   </div>
+
+  <!-- Reviewer Confirmation -->
+  {% if rationale_text %}
+  <div class="card mb-3">
+    <div class="card-header fw-semibold">Reviewer Confirmation</div>
+    <div class="card-body">
+      {% if reviewer_confirmed %}
+        <div class="alert alert-success mb-3">
+          <i class="bi bi-check-circle-fill me-2"></i>
+          Confirmed as <strong>{{ reviewer_confirmed_type or 'consistent' }}</strong> with customer profile
+          by <strong>{{ reviewer_confirmed_by }}</strong>
+          {% if reviewer_confirmed_at %}
+            on {{ reviewer_confirmed_at.strftime('%d/%m/%Y %H:%M') if reviewer_confirmed_at.strftime is defined else reviewer_confirmed_at }}
+          {% endif %}
+        </div>
+        <form method="post" action="{{ url_for('ai_rationale') }}" class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="customer_id" value="{{ customer_id }}">
+          <input type="hidden" name="period" value="all">
+          <input type="hidden" name="action" value="confirm_review">
+          <input type="hidden" name="reviewer_confirmed" value="0">
+          <button class="btn btn-outline-danger btn-sm" onclick="return confirm('Remove reviewer confirmation?')">
+            <i class="bi bi-x-circle me-1"></i>Remove Confirmation
+          </button>
+        </form>
+      {% else %}
+        <p class="text-muted small mb-3">Confirm whether the rationale is consistent or inconsistent with the customer profile.</p>
+        <div class="d-flex gap-2">
+          <form method="post" action="{{ url_for('ai_rationale') }}" class="d-inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="customer_id" value="{{ customer_id }}">
+            <input type="hidden" name="period" value="all">
+            <input type="hidden" name="action" value="confirm_review">
+            <input type="hidden" name="reviewer_confirmed" value="1">
+            <input type="hidden" name="confirmed_type" value="consistent">
+            <button class="btn btn-success btn-sm">
+              <i class="bi bi-check-lg me-1"></i>Consistent with profile
+            </button>
+          </form>
+          <form method="post" action="{{ url_for('ai_rationale') }}" class="d-inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="customer_id" value="{{ customer_id }}">
+            <input type="hidden" name="period" value="all">
+            <input type="hidden" name="action" value="confirm_review">
+            <input type="hidden" name="reviewer_confirmed" value="1">
+            <input type="hidden" name="confirmed_type" value="inconsistent">
+            <button class="btn btn-warning btn-sm">
+              <i class="bi bi-exclamation-triangle me-1"></i>Inconsistent with profile
+            </button>
+          </form>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
 {% else %}
 <div class="empty-state">
   <div class="empty-icon"><i class="bi bi-file-earmark-text"></i></div>
@@ -78,13 +156,20 @@
 {% endif %}
 
 <script>
+  function toggleNob() {
+    var et = document.getElementById('entityType').value;
+    var wrap = document.getElementById('nobWrap');
+    wrap.style.display = (et === 'individual') ? 'none' : '';
+  }
+  toggleNob();
+
   const copyBtn = document.getElementById('copyBtn');
   if (copyBtn) {
     copyBtn.addEventListener('click', async () => {
       const el = document.getElementById('rationaleOut');
       if (!el) return;
       try {
-        await navigator.clipboard.writeText(el.innerText);
+        await navigator.clipboard.writeText(el.value || el.innerText);
         copyBtn.textContent = 'Copied!';
         setTimeout(() => copyBtn.textContent = 'Copy to clipboard', 1500);
       } catch (e) {

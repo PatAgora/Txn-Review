@@ -1,100 +1,153 @@
-{% extends "base.html" %}
-{% block page_title %}Backup Codes{% endblock %}
-{% block content %}
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Backup Codes - Scrutinise TXN</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <link href="/static/vendor/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/vendor/css/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="/static/css/icons-fix.css" rel="stylesheet">
+    <link href="/static/css/login.css" rel="stylesheet">
+    <style>
+      .codes-grid {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+        margin-bottom: 20px;
+      }
+      .code-item {
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 10px; padding: 10px; text-align: center;
+        font-family: 'JetBrains Mono', monospace; font-size: 1.1rem;
+        color: var(--agora-orange); user-select: all; letter-spacing: 0.05em;
+      }
+      .btn-action {
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+        color: rgba(255,255,255,0.7); border-radius: 10px; padding: 10px 16px;
+        font-size: 0.85rem; cursor: pointer; transition: all 200ms;
+        display: flex; align-items: center; justify-content: center; gap: 6px;
+      }
+      .btn-action:hover {
+        border-color: var(--agora-orange); color: var(--agora-orange);
+        background: rgba(232, 145, 58, 0.1);
+      }
+      .btn-action i { font-size: 1rem; }
+      .tip-list {
+        color: rgba(255,255,255,0.5); font-size: 0.8rem;
+        list-style: none; padding: 0; margin: 0;
+      }
+      .tip-list li { padding: 4px 0; }
+      .tip-list li i { color: var(--agora-orange); margin-right: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="auth-shell">
+      <div class="auth-card">
+        <!-- Left: info -->
+        <div class="auth-left">
+          <div style="font-size: 3rem; color: var(--agora-orange); z-index: 1; position: relative;">
+            <i class="bi bi-shield-check"></i>
+          </div>
 
-<div class="row justify-content-center">
-  <div class="col-lg-6">
-    <div class="card">
-      <div class="card-header {% if show_success %}bg-success{% else %}bg-warning{% endif %} text-white">
-        <h5 class="mb-0">
-          {% if show_success %}
-            ✅ Two-Factor Authentication Enabled!
-          {% elif regenerated %}
-            🔄 Backup Codes Regenerated
-          {% else %}
-            🔑 Your Backup Codes
-          {% endif %}
-        </h5>
-      </div>
-      <div class="card-body">
-        
-        <div class="alert alert-warning">
-          <strong>⚠️ Important:</strong> Save these backup codes in a secure place. 
-          Each code can only be used once. If you lose access to your authenticator app, 
-          you can use these codes to log in.
-        </div>
-        
-        <div class="card bg-light mb-3">
-          <div class="card-body">
-            <div class="row">
-              {% for code in backup_codes %}
-              <div class="col-6 mb-2">
-                <code class="fs-5 user-select-all">{{ code[:4] }}-{{ code[4:] }}</code>
+          <div style="font-size: 1.3rem; font-weight: 700; color: #fff; z-index: 1; position: relative;">
+            {% if show_success %}
+              2FA Enabled Successfully
+            {% elif regenerated %}
+              Codes Regenerated
+            {% else %}
+              Your Backup Codes
+            {% endif %}
+          </div>
+          <div class="tagline">Save these codes in a secure place</div>
+
+          <div style="z-index: 1; position: relative; align-self: flex-start; width: 100%; padding: 0 10px;">
+            <div style="background: rgba(232,145,58,0.12); border: 1px solid rgba(232,145,58,0.25); border-radius: 10px; padding: 14px; margin-bottom: 20px;">
+              <div style="color: var(--agora-orange); font-weight: 600; font-size: 0.85rem; margin-bottom: 6px;">
+                <i class="bi bi-exclamation-triangle-fill"></i> Important
               </div>
+              <div style="color: rgba(255,255,255,0.7); font-size: 0.8rem; line-height: 1.5;">
+                Each code can only be used once. If you lose access to your authenticator app, use these codes to log in.
+              </div>
+            </div>
+
+            <div style="color: rgba(255,255,255,0.6); font-size: 0.8rem; font-weight: 600; margin-bottom: 8px;">
+              <i class="bi bi-lightbulb" style="color: var(--agora-orange);"></i> Storage Tips
+            </div>
+            <ul class="tip-list">
+              <li><i class="bi bi-check2"></i> Save in a password manager</li>
+              <li><i class="bi bi-check2"></i> Print and store securely</li>
+              <li><i class="bi bi-check2"></i> Don't store on the same device as your authenticator</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Right: codes -->
+        <div class="auth-right">
+          <div class="login-box">
+            <h3>Backup Codes</h3>
+            <div class="subcopy">Keep these somewhere safe</div>
+
+            <div class="codes-grid">
+              {% for code in backup_codes %}
+              <div class="code-item">{{ code[:4] }}-{{ code[4:] }}</div>
               {% endfor %}
+            </div>
+
+            <div class="d-flex gap-2 mb-3">
+              <button class="btn-action flex-fill" onclick="copyBackupCodes()">
+                <i class="bi bi-clipboard"></i> Copy
+              </button>
+              <button class="btn-action flex-fill" onclick="downloadBackupCodes()">
+                <i class="bi bi-download"></i> Download
+              </button>
+              <button class="btn-action flex-fill" onclick="window.print()">
+                <i class="bi bi-printer"></i> Print
+              </button>
+            </div>
+
+            <div class="d-grid">
+              <a href="{{ url_for('dashboard') }}" class="btn btn-login">
+                Continue to Dashboard
+              </a>
+            </div>
+
+            <div class="legal">
+              <hr>
+              <div>&copy; 2026 Agora Consulting Solutions</div>
             </div>
           </div>
         </div>
-        
-        <div class="d-flex gap-2 mb-3">
-          <button class="btn btn-outline-primary flex-fill" onclick="copyBackupCodes()">
-            📋 Copy Codes
-          </button>
-          <button class="btn btn-outline-secondary flex-fill" onclick="downloadBackupCodes()">
-            💾 Download
-          </button>
-          <button class="btn btn-outline-secondary flex-fill" onclick="window.print()">
-            🖨️ Print
-          </button>
-        </div>
-        
-        <div class="alert alert-info small mb-0">
-          <strong>Tips for storing backup codes:</strong>
-          <ul class="mb-0 mt-1">
-            <li>Save them in a password manager</li>
-            <li>Print and store in a secure location</li>
-            <li>Don't store them on the same device as your authenticator app</li>
-          </ul>
-        </div>
-        
-      </div>
-      <div class="card-footer">
-        <a href="{{ url_for('manage_2fa') }}" class="btn btn-primary">
-          Continue to Security Settings
-        </a>
       </div>
     </div>
-  </div>
-</div>
 
-<script>
-const backupCodes = {{ backup_codes | tojson }};
+    <script src="/static/vendor/js/bootstrap.bundle.min.js"></script>
+    <script>
+    const backupCodes = {{ backup_codes | tojson }};
 
-function copyBackupCodes() {
-  const text = backupCodes.map(c => c.slice(0,4) + '-' + c.slice(4)).join('\n');
-  navigator.clipboard.writeText(text).then(() => {
-    alert('Backup codes copied to clipboard!');
-  });
-}
+    function copyBackupCodes() {
+      const text = backupCodes.map(c => c.slice(0,4) + '-' + c.slice(4)).join('\n');
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Backup codes copied to clipboard!');
+      });
+    }
 
-function downloadBackupCodes() {
-  const text = 'Scrutinise TXN - Backup Codes\n' +
-               'Generated: ' + new Date().toISOString() + '\n' +
-               '================================\n\n' +
-               backupCodes.map(c => c.slice(0,4) + '-' + c.slice(4)).join('\n') +
-               '\n\n================================\n' +
-               'Keep these codes safe. Each code can only be used once.';
-  
-  const blob = new Blob([text], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'scrutinise-backup-codes.txt';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-</script>
+    function downloadBackupCodes() {
+      const text = 'Scrutinise TXN - Backup Codes\n' +
+                   'Generated: ' + new Date().toISOString() + '\n' +
+                   '================================\n\n' +
+                   backupCodes.map(c => c.slice(0,4) + '-' + c.slice(4)).join('\n') +
+                   '\n\n================================\n' +
+                   'Keep these codes safe. Each code can only be used once.';
 
-<link href="/static/css/2fa.css" rel="stylesheet">
-
-{% endblock %}
+      const blob = new Blob([text], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'scrutinise-backup-codes.txt';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+    </script>
+  </body>
+</html>

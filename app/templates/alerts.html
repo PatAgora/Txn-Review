@@ -33,6 +33,18 @@
           </select>
         </div>
 
+        <!-- Account -->
+        <div class="col-sm-3 col-md-2">
+          <label for="account" class="form-label">Account</label>
+          {% set acct = request.args.get('account', '') %}
+          <select id="account" name="account" class="form-select">
+            <option value="" {{ 'selected' if not acct }}>All</option>
+            {% for a in accounts %}
+            <option value="{{ a }}" {{ 'selected' if acct==a }}>{{ a }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
         <div class="col-md-3 d-flex gap-2">
           <button type="submit" class="btn btn-primary mt-4 flex-shrink-0">Apply filters</button>
           <!-- Clear but keep customer context -->
@@ -53,6 +65,7 @@
               <th scope="col" class="u-nowrap">Txn Date</th>
               <th scope="col" class="u-nowrap">Txn ID</th>
               <th scope="col">Customer</th>
+              <th scope="col">Account</th>
               <th scope="col">Country</th>
               <th scope="col" class="text-end" class="u-w-90">Score</th>
               <th scope="col" class="u-nowrap">Severity</th>
@@ -72,6 +85,7 @@
                     {{ cust }}
                   </a>
                 </td>
+                <td>{{ a.account_name or '—' }}</td>
                 <td class="u-nowrap">{{ a.country_iso2 or '—' }}</td>
                 <td class="text-end">{{ a.score }}</td>
                 <td class="u-nowrap">
@@ -96,7 +110,7 @@
             {% endfor %}
           {% else %}
             <tr>
-              <td colspan="8" class="text-center text-muted py-5">
+              <td colspan="9" class="text-center text-muted py-5">
                 No alerts match the current filters.
               </td>
             </tr>

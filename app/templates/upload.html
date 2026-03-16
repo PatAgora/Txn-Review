@@ -87,7 +87,7 @@
         <div class="col-md-3">
           <label class="form-label">Account (optional)</label>
           <input type="text" name="account_name" class="form-control"
-                 placeholder="e.g. Current Account, Savings"
+                 placeholder="e.g. 00000000"
                  {% if not selected_customer %}disabled{% endif %}>
         </div>
         <div class="col-md-4">
@@ -111,13 +111,75 @@
   </div>
 </div>
 
+<!-- Scoring Status Banner -->
+{% if selected_customer %}
+<div class="alert alert-info d-flex align-items-center py-2 mb-3 d-none" id="scoringBanner">
+  <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Processing...</span></div>
+  <span>Processing in progress for <strong>{{ selected_customer }}</strong>. This page will refresh automatically when complete.</span>
+</div>
+<div class="alert alert-success d-flex align-items-center py-2 mb-3 d-none" id="scoringDoneBanner">
+  <i class="bi bi-check-circle-fill me-2"></i>
+  <span>Processing complete for <strong>{{ selected_customer }}</strong>.</span>
+</div>
+<script>
+(function() {
+  var cid = "{{ selected_customer }}";
+  var wasScoring = false;
+  var poll = setInterval(function() {
+    fetch("/scoring_status/" + encodeURIComponent(cid))
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var banner = document.getElementById("scoringBanner");
+        var doneBanner = document.getElementById("scoringDoneBanner");
+        if (d.status === "scoring") {
+          wasScoring = true;
+          if (banner) banner.classList.remove("d-none");
+        } else if (d.status === "done") {
+          clearInterval(poll);
+          if (wasScoring) { location.reload(); }
+          else {
+            if (banner) banner.classList.add("d-none");
+            if (doneBanner) doneBanner.classList.remove("d-none");
+            setTimeout(function() { if (doneBanner) doneBanner.classList.add("d-none"); }, 5000);
+          }
+        } else if (d.status === "error") {
+          clearInterval(poll);
+          if (banner) {
+            banner.className = "alert alert-danger d-flex align-items-center py-2 mb-3";
+            banner.textContent = '';
+            var icon = document.createElement('i');
+            icon.className = 'bi bi-exclamation-triangle-fill me-2';
+            banner.appendChild(icon);
+            banner.appendChild(document.createTextNode('Scoring failed: ' + (d.message || 'Unknown error')));
+          }
+        } else if (d.status === "idle" && wasScoring) {
+          clearInterval(poll);
+          location.reload();
+        }
+      })
+      .catch(function() {});
+  }, 3000);
+})();
+</script>
+{% endif %}
+
 <!-- Statement History for Selected Customer -->
 {% if selected_customer %}
 <div class="card mb-4">
   <div class="card-body">
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h5 class="card-title mb-0">Statement History — {{ selected_customer }}</h5>
-      <a class="btn btn-sm btn-outline-primary" href="{{ url_for('dashboard', customer_id=selected_customer) }}">View Dashboard</a>
+      <div class="d-flex gap-2">
+        <form method="post" class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="customer_id" value="{{ selected_customer }}">
+          <input type="hidden" name="action" value="rescore">
+          <button class="btn btn-sm btn-outline-warning" onclick="return confirm('This will purge existing alerts and re-run scoring. Continue?')">
+            <i class="bi bi-arrow-repeat me-1"></i>Re-score
+          </button>
+        </form>
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('dashboard', customer_id=selected_customer) }}">View Dashboard</a>
+      </div>
     </div>
 
     {% if statements %}

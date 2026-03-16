@@ -6564,6 +6564,13 @@ def ai_analysis():
                 )
             db.execute("UPDATE ai_cases SET updated_at=CURRENT_TIMESTAMP WHERE id=?", (case_id,))
             db.commit()
+            user = get_current_user()
+            log_audit_event(
+                event_type="OUTREACH_RESPONSES_SAVED",
+                user_id=user["id"] if user else None,
+                username=user.get("username") if user else None,
+                details=json.dumps({"customer_id": cust, "case_id": case_id, "questions_count": len(request.values.getlist("qid"))}),
+            )
             flash("Responses saved.")
             return redirect(url_for("ai_analysis", customer_id=cust, period=period))
 
@@ -6917,7 +6924,59 @@ def build_rationale_text(
         return lines
 
     # ===================================================================
-    # COMPOSE STRUCTURED RATIONALE
+    # CHECK FOR CUSTOM RATIONALE TEMPLATE
+    # ===================================================================
+    total_in = float(m.get("total_in") or 0)
+    total_out = float(m.get("total_out") or 0)
+    tags = dict(m.get("tag_counter") or {})
+    alerts_line = f"{len(tags)} alert type(s) fired across {sum(tags.values())} transaction(s)." if tags else "No alerts were noted during the review period."
+
+    # Build outreach status line
+    outreach_status_line = ""
+    qa_section_text = ""
+    if answers:
+        active_answers = [r for r in answers if not r.get("not_required")]
+        answered_count = sum(1 for r in active_answers if (r.get("answer") or "").strip())
+        outstanding_count = len(active_answers) - answered_count
+        status_parts = []
+        if answered_count:
+            status_parts.append(f"{answered_count} of {len(active_answers)} responses received")
+        if outstanding_count:
+            status_parts.append(f"{outstanding_count} response(s) outstanding")
+        if not status_parts:
+            status_parts.append(f"{len(answers)} question(s) prepared; responses currently outstanding")
+        outreach_status_line = f"Outreach status: {'; '.join(status_parts)}."
+        # Build Q&A section text
+        qa_lines = []
+        for idx, r in enumerate(answers, 1):
+            q = r.get("question", "")
+            ans = (r.get("answer") or "").strip()
+            qa_lines.append(f"Q{idx}: {q}")
+            qa_lines.append(f"A{idx}: {ans if ans else '[No response received]'}")
+        qa_section_text = "\n".join(qa_lines)
+
+    custom_tpl = cfg_get("tpl_rationale_structure", None) or ""
+    if custom_tpl.strip():
+        replacements = {
+            "{nature_of_business}": (nature_of_business or "").strip(),
+            "{credits_total}": f"\u00a3{total_in:,.2f}",
+            "{debits_total}": f"\u00a3{total_out:,.2f}",
+            "{period}": period_txt,
+            "{avg_monthly_credits}": f"\u00a3{avg_monthly_in:,.2f}",
+            "{avg_monthly_debits}": f"\u00a3{avg_monthly_out:,.2f}",
+            "{declared_income}": f"\u00a3{est_income:,.2f}" if est_income else "Not specified",
+            "{declared_expenditure}": f"\u00a3{est_expenditure:,.2f}" if est_expenditure else "Not specified",
+            "{alerts}": alerts_line,
+            "{outreach_status}": outreach_status_line,
+            "{qa_section}": qa_section_text,
+        }
+        result = custom_tpl
+        for placeholder, value in replacements.items():
+            result = result.replace(placeholder, value)
+        return result
+
+    # ===================================================================
+    # COMPOSE STRUCTURED RATIONALE (default 9-section format)
     # ===================================================================
     out = []
 
@@ -7065,7 +7124,9 @@ def build_rationale_text(
     out.append("")
 
     # --- 8. Outreach Q&A ---
+    # Marker used to strip Q&A from rationale when shown alongside separate Q&A display
     if answers:
+        out.append("--- Outreach Questions & Responses ---")
         out.append("8. OUTREACH QUESTIONS & RESPONSES")
         for idx, r in enumerate(answers, 1):
             q = (r.get("question") or "").strip()
@@ -7246,6 +7307,18 @@ def ai_rationale():
             est_income=est_income_num,
             est_expenditure=est_expenditure_num,
             rationale_text=rationale_text,
+        )
+        user = get_current_user()
+        log_audit_event(
+            event_type="RATIONALE_GENERATED",
+            user_id=user["id"] if user else None,
+            username=user.get("username") if user else None,
+            details=json.dumps({
+                "customer_id": customer_id,
+                "entity_type": entity_type,
+                "period_from": p_from,
+                "period_to": p_to,
+            }),
         )
         # Redirect with both params kept
         return redirect(url_for("ai_rationale", customer_id=customer_id, period=period))
@@ -8478,6 +8551,10 @@ def report_preview(customer_id):
     est_income = safe_get(rationale, 'est_income') or safe_get(kyc, 'expected_monthly_in')
     est_expenditure = safe_get(rationale, 'est_expenditure') or safe_get(kyc, 'expected_monthly_out')
     rationale_text = safe_get(rationale, 'rationale_text', '')
+    # Strip Q&A section from rationale — it's shown separately in Customer Outreach
+    _qa_marker = "--- Outreach Questions & Responses ---"
+    if rationale_text and _qa_marker in rationale_text:
+        rationale_text = rationale_text[:rationale_text.index(_qa_marker)].rstrip()
     reviewer_confirmed = safe_get(rationale, 'reviewer_confirmed', 0)
     reviewer_confirmed_by = safe_get(rationale, 'reviewer_confirmed_by', '')
     reviewer_confirmed_at = safe_get(rationale, 'reviewer_confirmed_at', '')

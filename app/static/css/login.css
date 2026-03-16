@@ -1,10 +1,11 @@
 /* ==========================================================
-   Scrutinise TXN – Login & Auth Pages (Dark Tech Theme)
+   Scrutinise TXN – Login & Auth Pages (Booklet / Agora Theme)
    ========================================================== */
 
 :root {
-  --agora-navy-dark:    #1A2530;
-  --agora-slate:        #3D4F5F;
+  --agora-navy:         #2C3F4F;
+  --agora-navy-dark:    #243444;
+  --agora-navy-deeper:  #1C2D3D;
   --agora-orange:       #E8913A;
   --agora-orange-dark:  #D07A2B;
   --agora-orange-light: rgba(232, 145, 58, 0.10);
@@ -19,14 +20,14 @@
 html, body {
   height: 100%; margin: 0; padding: 0;
   font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-  background: var(--n-100);
+  background: var(--agora-navy);
   -webkit-font-smoothing: antialiased;
 }
 
 .auth-shell {
   position: fixed; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  background: var(--n-100);
+  background: var(--agora-navy);
 }
 
 .auth-card {
@@ -34,13 +35,13 @@ html, body {
   border-radius: 20px; overflow: hidden;
   box-shadow: 0 25px 60px rgba(0,0,0,0.15);
   display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr);
-  background: #fff;
+  background: var(--agora-navy);
   height: clamp(640px, calc(100vh - 100px), 900px);
 }
 
-/* === Left Panel — Dark AI Tech === */
+/* === Left Panel — Agora Navy === */
 .auth-left {
-  background: linear-gradient(145deg, #0F1923 0%, var(--agora-navy-dark) 40%, var(--agora-slate) 100%);
+  background: linear-gradient(145deg, var(--agora-navy-deeper) 0%, var(--agora-navy) 40%, var(--agora-navy-dark) 100%);
   padding: 64px 56px; color: #fff;
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
@@ -112,7 +113,7 @@ html, body {
 
 /* === Right Panel — Form === */
 .auth-right {
-  background: #fff;
+  background: var(--agora-navy);
   display: flex; align-items: center; justify-content: center;
   padding: 64px 56px;
 }
@@ -121,25 +122,35 @@ html, body {
 .brand-mark {
   display: flex; align-items: center; justify-content: center;
   gap: 8px; margin: 0 auto 6px;
-  color: var(--n-900); font-weight: 700; font-size: 1rem;
+  color: rgba(255,255,255,0.85); font-weight: 700; font-size: 1rem;
 }
 .brand-mark .mark-icon { width: 20px; height: 20px; display: inline-flex; }
 .brand-mark .mark-icon svg { width: 20px; height: 20px; stroke: var(--agora-orange); stroke-width: 3; fill: none; }
 
+/* Alert styling on dark bg */
+.auth-right .alert { background: rgba(232,145,58,0.15); border-color: rgba(232,145,58,0.3); color: rgba(255,255,255,0.85); }
+
 .login-box h3 {
   text-align: center; margin: 8px 0;
-  color: var(--n-900); font-weight: 800; font-size: 2.25rem;
+  color: #fff; font-weight: 800; font-size: 2.25rem;
 }
 .subcopy {
-  text-align: center; color: var(--n-500);
+  text-align: center; color: rgba(255,255,255,0.55);
   font-size: .95rem; line-height: 1.45;
   margin: 0 0 18px; white-space: nowrap;
 }
 
-.form-control { border-radius: 12px; height: 48px; border: 1px solid var(--n-200); }
+.form-label { color: rgba(255,255,255,0.7); }
+.form-control {
+  border-radius: 12px; height: 48px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.08); color: #fff;
+}
+.form-control::placeholder { color: rgba(255,255,255,0.35); }
 .form-control:focus {
   border-color: var(--agora-orange);
   box-shadow: 0 0 0 3px var(--agora-orange-light);
+  background: rgba(255,255,255,0.12); color: #fff;
 }
 
 .btn-login {
@@ -159,9 +170,10 @@ html, body {
 .forgot-password a { color: var(--agora-orange); text-decoration: none; }
 .forgot-password a:hover { text-decoration: underline; color: var(--agora-orange-dark); }
 
-.legal { margin-top: 20px; color: var(--n-500); font-size: .8rem; text-align: center; }
+.legal { margin-top: 20px; color: rgba(255,255,255,0.45); font-size: .8rem; text-align: center; }
+.legal hr { border-color: rgba(255,255,255,0.12); }
 .badges { display: flex; gap: 18px; justify-content: center; align-items: center; margin-top: 8px; flex-wrap: nowrap; white-space: nowrap; }
-.badge-item { display: flex; align-items: center; gap: 6px; color: var(--n-700); font-weight: 600; font-size: .8rem; flex: 0 0 auto; }
+.badge-item { display: flex; align-items: center; gap: 6px; color: rgba(255,255,255,0.6); font-weight: 600; font-size: .8rem; flex: 0 0 auto; }
 .badge-item i { font-size: .9rem; color: var(--agora-orange); }
 
 .alert { border-radius: 12px; }

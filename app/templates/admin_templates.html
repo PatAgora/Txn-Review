@@ -94,7 +94,13 @@
     </form>
   </div>
   <div class="card-body">
-    <p class="text-muted small mb-3">Customise the structure of the rationale output. Leave blank to use the built-in default.</p>
+    <p class="text-muted small mb-3">Customise the structure of the rationale output. Use placeholders below to insert dynamic data. Leave blank to use the built-in 9-section default.</p>
+    <div class="alert alert-light border small mb-3">
+      <strong>Available placeholders:</strong><br>
+      <code>{nature_of_business}</code> <code>{credits_total}</code> <code>{debits_total}</code> <code>{period}</code>
+      <code>{avg_monthly_credits}</code> <code>{avg_monthly_debits}</code> <code>{declared_income}</code>
+      <code>{declared_expenditure}</code> <code>{alerts}</code> <code>{outreach_status}</code> <code>{qa_section}</code>
+    </div>
     <form method="post">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="action" value="save_rationale">

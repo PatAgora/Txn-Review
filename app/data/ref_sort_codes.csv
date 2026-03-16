@@ -1,0 +1,15 @@
+sort_code,bank_name,branch,schemes,valid_from,valid_to
+110000,HSBC UK Bank plc,London Main,BACS FPS CHAPS,2000-01-01,2099-12-31
+110001,HSBC UK Bank plc,Birmingham,BACS FPS,2000-01-01,2099-12-31
+200000,Barclays Bank plc,London Main,BACS FPS CHAPS,2000-01-01,2099-12-31
+200100,Barclays Bank plc,Manchester,BACS FPS,2000-01-01,2099-12-31
+300000,Lloyds Bank plc,London Main,BACS FPS CHAPS,2000-01-01,2099-12-31
+400000,NatWest,London Main,BACS FPS CHAPS,2000-01-01,2099-12-31
+500000,Santander UK plc,London Main,BACS FPS CHAPS,2000-01-01,2099-12-31
+600000,Nationwide Building Society,Swindon,BACS FPS,2000-01-01,2099-12-31
+700000,TSB Bank plc,London Main,BACS FPS,2000-01-01,2099-12-31
+800000,Co-operative Bank plc,Manchester,BACS FPS,2000-01-01,2099-12-31
+830000,Svenska Handelsbanken,London,BACS FPS,2010-01-01,2099-12-31
+090000,Metro Bank,London,BACS FPS,2015-01-01,2099-12-31
+040000,Monzo Bank Ltd,London,FPS,2017-01-01,2099-12-31
+230000,Starling Bank,London,FPS,2018-01-01,2099-12-31

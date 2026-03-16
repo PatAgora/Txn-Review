@@ -1,58 +1,116 @@
-{% extends "base.html" %}
-{% block page_title %}Setup Two-Factor Authentication{% endblock %}
-{% block content %}
-
-<div class="row justify-content-center">
-  <div class="col-lg-8">
-    <div class="card">
-      <div class="card-header bg-primary text-white">
-        <h5 class="mb-0">🛡️ Setup Two-Factor Authentication</h5>
-      </div>
-      <div class="card-body">
-        
-        {% with messages = get_flashed_messages() %}
-          {% if messages %}
-            <div class="alert alert-warning">{{ messages[0] }}</div>
-          {% endif %}
-        {% endwith %}
-        
-        <div class="row">
-          <div class="col-md-6 text-center border-end">
-            <h6 class="mb-3">Step 1: Scan QR Code</h6>
-            <p class="text-muted small">
-              Scan this QR code with your authenticator app<br>
-              (Google Authenticator, Authy, Microsoft Authenticator, etc.)
-            </p>
-            <img src="{{ qr_code }}" alt="QR Code" class="img-fluid mb-3 u-maxw-200">
-            
-            <div class="mt-3">
-              <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#manualSetup">
-                Can't scan? Enter manually
-              </button>
-              <div class="collapse mt-2" id="manualSetup">
-                <div class="card card-body bg-light">
-                  <small class="text-muted">Account:</small>
-                  <code>{{ username }}</code>
-                  <small class="text-muted mt-2">Secret Key:</small>
-                  <code class="user-select-all u-break-all">{{ secret }}</code>
-                </div>
-              </div>
-            </div>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Setup 2FA - Scrutinise TXN</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <link href="/static/vendor/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/vendor/css/bootstrap-icons.min.css" rel="stylesheet">
+    <link href="/static/css/icons-fix.css" rel="stylesheet">
+    <link href="/static/css/login.css" rel="stylesheet">
+    <style>
+      .qr-wrapper {
+        background: #fff; border-radius: 12px; padding: 12px;
+        display: inline-block; margin-bottom: 16px;
+      }
+      .qr-wrapper img { max-width: 180px; height: auto; display: block; }
+      .manual-key {
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+        border-radius: 10px; padding: 12px; margin-top: 12px;
+      }
+      .manual-key code {
+        color: var(--agora-orange); word-break: break-all; font-size: 0.85rem;
+      }
+      .manual-key small { color: rgba(255,255,255,0.5); }
+      .step-badge {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 28px; height: 28px; border-radius: 50%;
+        background: var(--agora-orange); color: #fff;
+        font-weight: 700; font-size: 0.85rem; margin-right: 8px;
+      }
+      .step-title {
+        color: #fff; font-weight: 700; font-size: 1rem;
+        display: flex; align-items: center; margin-bottom: 12px;
+      }
+      .app-pills { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      .app-pill {
+        background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 8px; padding: 6px 12px; font-size: 0.75rem;
+        color: rgba(255,255,255,0.6);
+      }
+      .code-input {
+        font-size: 1.5rem; letter-spacing: 0.5rem; text-align: center;
+        font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      }
+      .btn-manual-toggle {
+        background: none; border: 1px solid rgba(255,255,255,0.15);
+        color: rgba(255,255,255,0.6); border-radius: 8px; padding: 4px 12px;
+        font-size: 0.8rem; cursor: pointer; transition: all 200ms;
+      }
+      .btn-manual-toggle:hover {
+        border-color: var(--agora-orange); color: var(--agora-orange);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="auth-shell">
+      <div class="auth-card">
+        <!-- Left: QR code & instructions -->
+        <div class="auth-left">
+          <div class="shield-icon" style="font-size: 2.5rem; color: var(--agora-orange); margin-bottom: 8px;">
+            <i class="bi bi-shield-lock-fill"></i>
           </div>
-          
-          <div class="col-md-6">
-            <h6 class="mb-3">Step 2: Verify Setup</h6>
-            <p class="text-muted small">
-              Enter the 6-digit code shown in your authenticator app to verify setup.
-            </p>
-            
+
+          <div style="font-size: 1.3rem; font-weight: 700; color: #fff; z-index: 1; position: relative;">
+            Setup Two-Factor Authentication
+          </div>
+          <div class="tagline" style="margin-bottom: 16px;">Scan the QR code with your authenticator app</div>
+
+          <div class="qr-wrapper" style="z-index: 1; position: relative;">
+            <img src="{{ qr_code }}" alt="QR Code">
+          </div>
+
+          <button class="btn-manual-toggle" type="button" onclick="document.getElementById('manualKey').style.display = document.getElementById('manualKey').style.display === 'none' ? 'block' : 'none'" style="z-index: 1; position: relative;">
+            <i class="bi bi-keyboard"></i> Can't scan? Enter manually
+          </button>
+
+          <div id="manualKey" class="manual-key" style="display: none; z-index: 1; position: relative;">
+            <small>Account:</small><br>
+            <code>{{ username }}</code><br>
+            <small style="margin-top: 6px; display: inline-block;">Secret Key:</small><br>
+            <code class="user-select-all">{{ secret }}</code>
+          </div>
+
+          <div class="app-pills" style="z-index: 1; position: relative;">
+            <div class="app-pill"><i class="bi bi-google"></i> Google Authenticator</div>
+            <div class="app-pill"><i class="bi bi-microsoft"></i> Microsoft Authenticator</div>
+            <div class="app-pill"><i class="bi bi-phone"></i> Authy</div>
+          </div>
+        </div>
+
+        <!-- Right: verification form -->
+        <div class="auth-right">
+          <div class="login-box">
+            <h3>Verify Setup</h3>
+            <div class="subcopy">Enter the 6-digit code from your authenticator app</div>
+
+            {% with messages = get_flashed_messages() %}
+              {% if messages %}
+                <div class="alert alert-warning">{{ messages[0] }}</div>
+              {% endif %}
+            {% endwith %}
+
             <form method="post">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <div class="mb-3">
-                <label class="form-label">Verification Code</label>
-                <input type="text" 
-                       name="code" 
-                       class="form-control form-control-lg text-center u-code-input" 
+                <label for="code" class="form-label">Verification Code</label>
+                <input type="text"
+                       name="code"
+                       id="code"
+                       class="form-control code-input"
                        placeholder="000000"
                        maxlength="6"
                        pattern="[0-9]{6}"
@@ -60,41 +118,24 @@
                        required
                        autofocus>
               </div>
-              
-              <button type="submit" class="btn btn-primary w-100">
-                Verify and Enable 2FA
-              </button>
+              <div class="d-grid">
+                <button type="submit" class="btn btn-login">Verify &amp; Enable 2FA</button>
+              </div>
             </form>
-          </div>
-        </div>
-        
-        <hr class="my-4">
-        
-        <div class="alert alert-info mb-0">
-          <h6 class="alert-heading">📱 Recommended Authenticator Apps</h6>
-          <div class="row small">
-            <div class="col-md-4">
-              <strong>Google Authenticator</strong><br>
-              <span class="text-muted">iOS & Android</span>
-            </div>
-            <div class="col-md-4">
-              <strong>Microsoft Authenticator</strong><br>
-              <span class="text-muted">iOS & Android</span>
-            </div>
-            <div class="col-md-4">
-              <strong>Authy</strong><br>
-              <span class="text-muted">iOS, Android, Desktop</span>
+
+            <div class="legal">
+              <hr>
+              <div style="color: rgba(255,255,255,0.45); font-size: .85rem;">
+                <i class="bi bi-info-circle"></i> After verification, you'll receive backup codes for account recovery
+              </div>
+              <hr>
+              <div>&copy; 2026 Agora Consulting Solutions</div>
             </div>
           </div>
         </div>
-        
       </div>
     </div>
-    
-    <div class="text-center mt-3">
-      <a href="{{ url_for('dashboard') }}" class="text-muted">Cancel and return to dashboard</a>
-    </div>
-  </div>
-</div>
 
-{% endblock %}
+    <script src="/static/vendor/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

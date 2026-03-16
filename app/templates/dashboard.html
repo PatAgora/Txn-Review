@@ -13,6 +13,72 @@
 {% elif filter_meta and filter_meta.customer_id %}
 <!-- ==================== CUSTOMER-SPECIFIC MODE ==================== -->
 
+<!-- Scoring Status Banner -->
+<div class="alert alert-info d-flex align-items-center py-2 mb-3{% if not (scoring_status and scoring_status.status == 'scoring') %} d-none{% endif %}" id="scoringBanner">
+  <div class="spinner-border spinner-border-sm me-2" role="status"><span class="visually-hidden">Processing...</span></div>
+  <span>Processing in progress for <strong>{{ filter_meta.customer_id }}</strong>. This page will refresh automatically when complete.</span>
+</div>
+<div class="alert alert-success d-flex align-items-center py-2 mb-3 d-none" id="scoringDoneBanner">
+  <i class="bi bi-check-circle-fill me-2"></i>
+  <span>Processing complete for <strong>{{ filter_meta.customer_id }}</strong>.</span>
+</div>
+
+<script>
+(function() {
+  var cid = "{{ filter_meta.customer_id }}";
+  var wasScoring = {{ 'true' if (scoring_status and scoring_status.status == 'scoring') else 'false' }};
+  var poll = setInterval(function() {
+    fetch("/scoring_status/" + encodeURIComponent(cid))
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var banner = document.getElementById("scoringBanner");
+        var doneBanner = document.getElementById("scoringDoneBanner");
+        if (d.status === "scoring") {
+          wasScoring = true;
+          if (banner) { banner.classList.remove("d-none"); }
+        } else if (d.status === "done") {
+          clearInterval(poll);
+          if (wasScoring) {
+            location.reload();
+          } else {
+            if (banner) { banner.classList.add("d-none"); }
+            if (doneBanner) { doneBanner.classList.remove("d-none"); }
+            setTimeout(function() { if (doneBanner) doneBanner.classList.add("d-none"); }, 5000);
+          }
+        } else if (d.status === "error") {
+          clearInterval(poll);
+          if (banner) {
+            banner.className = "alert alert-danger d-flex align-items-center py-2 mb-3";
+            banner.textContent = '';
+            var icon = document.createElement('i');
+            icon.className = 'bi bi-exclamation-triangle-fill me-2';
+            banner.appendChild(icon);
+            banner.appendChild(document.createTextNode('Scoring failed: ' + (d.message || 'Unknown error')));
+          }
+        } else if (d.status === "idle" && wasScoring) {
+          clearInterval(poll);
+          location.reload();
+        }
+      })
+      .catch(function() {});
+  }, 3000);
+})();
+</script>
+
+<!-- Account filter -->
+{% if accounts and accounts|length > 0 %}
+<form method="get" class="d-flex align-items-center gap-2 mb-3">
+  <input type="hidden" name="customer_id" value="{{ filter_meta.customer_id }}">
+  <label class="form-label mb-0 text-nowrap">Account:</label>
+  <select class="form-select form-select-sm" name="account" style="max-width: 200px;" onchange="this.form.submit()">
+    <option value="">All Accounts</option>
+    {% for a in accounts %}
+    <option value="{{ a }}" {{ 'selected' if selected_account == a }}>{{ a }}</option>
+    {% endfor %}
+  </select>
+</form>
+{% endif %}
+
 <!-- KPI tiles (clickable) -->
 <div class="row g-3 mb-4">
   <div class="col-md-3">

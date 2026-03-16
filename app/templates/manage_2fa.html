@@ -45,12 +45,13 @@
             </div>
           </div>
           
+          {% if current_user and current_user.role == 'admin' %}
           <div class="col-md-6">
             <div class="card bg-light">
               <div class="card-body">
                 <h6>Disable 2FA</h6>
                 <p class="small text-muted mb-2">
-                  Removing 2FA will make your account less secure.
+                  Removing 2FA will make your account less secure. Only administrators can disable 2FA.
                 </p>
                 <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#disableModal">
                   Disable Two-Factor Authentication
@@ -58,6 +59,7 @@
               </div>
             </div>
           </div>
+          {% endif %}
         </div>
         
         {% else %}
