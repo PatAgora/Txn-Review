@@ -43,9 +43,6 @@
       <button class="btn btn-primary">Generate Rationale</button>
       {% if rationale_text %}
         <button class="btn btn-outline-secondary" type="button" id="copyBtn">Copy to clipboard</button>
-        <a href="{{ url_for('report_preview', customer_id=customer_id) }}" class="btn btn-success">
-          <i class="bi bi-file-earmark-pdf me-1"></i>Generate PDF Report
-        </a>
       {% endif %}
     </div>
   </form>
@@ -70,7 +67,9 @@
     <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
       <span>Rationale Output</span>
       {% if rationale_text %}
-        <span class="badge text-bg-info">Editable</span>
+        <a href="{{ url_for('report_preview', customer_id=customer_id) }}" class="btn btn-primary btn-sm">
+          <i class="bi bi-file-earmark-pdf me-1"></i>Generate PDF Report
+        </a>
       {% endif %}
     </div>
     <div class="card-body">
@@ -119,25 +118,25 @@
       {% else %}
         <p class="text-muted small mb-3">Confirm whether the rationale is consistent or inconsistent with the customer profile.</p>
         <div class="d-flex gap-2">
-          <form method="post" action="{{ url_for('ai_rationale') }}" class="d-inline">
+          <form method="post" action="{{ url_for('ai_rationale') }}" class="flex-fill">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="customer_id" value="{{ customer_id }}">
             <input type="hidden" name="period" value="all">
             <input type="hidden" name="action" value="confirm_review">
             <input type="hidden" name="reviewer_confirmed" value="1">
             <input type="hidden" name="confirmed_type" value="consistent">
-            <button class="btn btn-success btn-sm">
+            <button class="btn btn-sm w-100" style="background: #d4edda; color: #155724; border: 1px solid #c3e6cb;">
               <i class="bi bi-check-lg me-1"></i>Consistent with profile
             </button>
           </form>
-          <form method="post" action="{{ url_for('ai_rationale') }}" class="d-inline">
+          <form method="post" action="{{ url_for('ai_rationale') }}" class="flex-fill">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <input type="hidden" name="customer_id" value="{{ customer_id }}">
             <input type="hidden" name="period" value="all">
             <input type="hidden" name="action" value="confirm_review">
             <input type="hidden" name="reviewer_confirmed" value="1">
             <input type="hidden" name="confirmed_type" value="inconsistent">
-            <button class="btn btn-warning btn-sm">
+            <button class="btn btn-sm w-100" style="background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;">
               <i class="bi bi-exclamation-triangle me-1"></i>Inconsistent with profile
             </button>
           </form>

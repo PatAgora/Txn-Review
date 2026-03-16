@@ -15,8 +15,8 @@
 
 html, body {
   height: 100%; margin: 0; padding: 0;
-  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-  background: var(--n-100);
+  font-family: 'Poppins', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--agora-navy);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -24,7 +24,7 @@ html, body {
 .auth-container {
   position: fixed; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  background: var(--n-100);
+  background: var(--agora-navy);
 }
 
 /* Booklet card — two-panel grid */

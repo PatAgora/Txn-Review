@@ -696,14 +696,21 @@ def _run_scoring_background(customer_id, purge_first=False):
                 db.commit()
             score_new_transactions(customer_id=customer_id)
             refresh_customer_summary(customer_id)
+            # Mark all statements for this customer as scored
+            db.execute("UPDATE statements SET scored_at=CURRENT_TIMESTAMP WHERE customer_id=? AND scored_at IS NULL", (customer_id,))
+            db.commit()
         _set_scoring_status(customer_id, "done", f"Scoring complete for {customer_id}")
     except Exception as e:
+        import traceback
+        err_detail = traceback.format_exc()
         app.logger.error(f"Background scoring failed for {customer_id}: {e}", exc_info=True)
-        _set_scoring_status(customer_id, "error", "Scoring failed — see server logs for details")
+        print(f"[SCORING ERROR] {customer_id}: {e}\n{err_detail}", flush=True)
+        _set_scoring_status(customer_id, "error", f"Scoring failed: {e}")
 
 
 def submit_scoring(customer_id, purge_first=False):
     """Submit scoring to the background executor. Returns immediately."""
+    _set_scoring_status(customer_id, "scoring")
     _scoring_executor.submit(_run_scoring_background, customer_id, purge_first)
 
 
@@ -737,10 +744,16 @@ def _run_ingest_and_score_background(customer_id, tmp_path, stmt_id, original_fi
             db.commit()
             score_new_transactions(customer_id=customer_id)
             refresh_customer_summary(customer_id)
+            # Mark statement as scored with timestamp
+            db.execute("UPDATE statements SET scored_at=CURRENT_TIMESTAMP WHERE id=?", (stmt_id,))
+            db.commit()
         _set_scoring_status(customer_id, "done", f"Ingested {n} transactions and scoring complete")
     except Exception as e:
+        import traceback
+        err_detail = traceback.format_exc()
         app.logger.error(f"Background ingest+scoring failed for {customer_id}: {e}", exc_info=True)
-        _set_scoring_status(customer_id, "error", "Upload/scoring failed — see server logs for details")
+        print(f"[SCORING ERROR] {customer_id}: {e}\n{err_detail}", flush=True)
+        _set_scoring_status(customer_id, "error", f"Upload/scoring failed: {e}")
     finally:
         try:
             os.unlink(tmp_path)
@@ -751,6 +764,7 @@ def _run_ingest_and_score_background(customer_id, tmp_path, stmt_id, original_fi
 def submit_ingest_and_score(customer_id, tmp_path, stmt_id, original_filename,
                             account_name, user_id, username):
     """Submit ingest+scoring to the background executor. Returns immediately."""
+    _set_scoring_status(customer_id, "scoring", "Ingesting transactions…")
     _scoring_executor.submit(
         _run_ingest_and_score_background,
         customer_id, tmp_path, stmt_id, original_filename,
@@ -1388,6 +1402,13 @@ def ensure_statements_table():
     if not _column_exists('transactions', 'account_name'):
         try:
             db.execute("ALTER TABLE transactions ADD COLUMN account_name TEXT;")
+            db.commit()
+        except Exception:
+            db.rollback()
+    # Add scored_at timestamp for processing speed metrics
+    if not _column_exists('statements', 'scored_at'):
+        try:
+            db.execute("ALTER TABLE statements ADD COLUMN scored_at TIMESTAMP;")
             db.commit()
         except Exception:
             db.rollback()
@@ -3488,6 +3509,11 @@ def ensure_ai_tables():
             db.execute("ALTER TABLE ai_answers ADD COLUMN not_required_rationale TEXT;")
         except Exception:
             pass
+    if not _column_exists('ai_cases', 'outreach_email_text'):
+        try:
+            db.execute("ALTER TABLE ai_cases ADD COLUMN outreach_email_text TEXT;")
+        except Exception:
+            pass
     db.commit()
 
 def fetch_customer_alerts_with_tags(customer_id, dfrom=None, dto=None):
@@ -4022,7 +4048,7 @@ def score_new_transactions(customer_id=None):
         if on["dormancy"] and float(t["base_amount"]) >= dormancy_reactivation_amount:
             earliest = cust_earliest.get(t["customer_id"])
             if earliest:
-                earliest_d = earliest if isinstance(earliest, date) else date.fromisoformat(str(earliest))
+                earliest_d = earliest.date() if isinstance(earliest, datetime) else (earliest if isinstance(earliest, date) else date.fromisoformat(str(earliest)[:10]))
                 dormancy_cutoff = d - timedelta(days=dormancy_inactive_days)
                 if earliest_d < dormancy_cutoff:
                     prev_date = _dormancy_cache.get((t["customer_id"], d.isoformat()))
@@ -5779,6 +5805,69 @@ def admin_usage_report():
         ORDER BY month DESC
     """).fetchall()
 
+    # Processing speed per customer (avg per customer, grouped by user/month)
+    speed_rows = db.execute("""
+        SELECT u.username, u.user_type,
+               TO_CHAR(s.uploaded_at, 'YYYY-MM') AS month,
+               AVG(cust_avg.avg_secs) AS avg_seconds
+        FROM (
+            SELECT customer_id, uploaded_by,
+                   TO_CHAR(uploaded_at, 'YYYY-MM') AS month,
+                   AVG(EXTRACT(EPOCH FROM (scored_at - uploaded_at))) AS avg_secs
+            FROM statements
+            WHERE scored_at IS NOT NULL AND uploaded_at IS NOT NULL
+            GROUP BY customer_id, uploaded_by, TO_CHAR(uploaded_at, 'YYYY-MM')
+        ) cust_avg
+        JOIN statements s ON s.customer_id = cust_avg.customer_id
+            AND TO_CHAR(s.uploaded_at, 'YYYY-MM') = cust_avg.month
+            AND s.uploaded_by = cust_avg.uploaded_by
+        JOIN users u ON u.id = cust_avg.uploaded_by
+        GROUP BY u.username, u.user_type, TO_CHAR(s.uploaded_at, 'YYYY-MM')
+    """).fetchall()
+    speed_lookup = {}
+    for r in speed_rows:
+        speed_lookup[(r["month"], r["username"], r["user_type"])] = float(r["avg_seconds"]) if r["avg_seconds"] else 0
+
+    # Detailed processing speed per statement for the new section
+    detail_speed_rows = db.execute("""
+        SELECT u.username, u.user_type,
+               TO_CHAR(s.uploaded_at, 'YYYY-MM') AS month,
+               COUNT(s.id) AS statement_count,
+               AVG(EXTRACT(EPOCH FROM (s.scored_at - s.uploaded_at))) AS avg_seconds,
+               MIN(EXTRACT(EPOCH FROM (s.scored_at - s.uploaded_at))) AS min_seconds,
+               MAX(EXTRACT(EPOCH FROM (s.scored_at - s.uploaded_at))) AS max_seconds,
+               COALESCE(SUM(s.record_count), 0) AS total_records
+        FROM statements s
+        JOIN users u ON u.id = s.uploaded_by
+        WHERE s.scored_at IS NOT NULL AND s.uploaded_at IS NOT NULL
+        GROUP BY u.username, u.user_type, TO_CHAR(s.uploaded_at, 'YYYY-MM')
+        ORDER BY month DESC, u.username
+    """).fetchall()
+
+    def _fmt_secs(secs):
+        if not secs or secs <= 0: return "—"
+        secs = float(secs)
+        if secs < 60: return f"{secs:.1f}s"
+        if secs < 3600: return f"{secs/60:.1f}m"
+        return f"{secs/3600:.1f}h"
+
+    processing_detail = []
+    all_speed_users = set()
+    all_speed_months = set()
+    for r in detail_speed_rows:
+        all_speed_users.add(r["username"])
+        all_speed_months.add(r["month"])
+        processing_detail.append({
+            "username": r["username"],
+            "user_type": r["user_type"],
+            "month": r["month"],
+            "statements": r["statement_count"],
+            "records": int(r["total_records"]),
+            "avg": _fmt_secs(r["avg_seconds"]),
+            "min": _fmt_secs(r["min_seconds"]),
+            "max": _fmt_secs(r["max_seconds"]),
+        })
+
     # Build structured report data
     from collections import defaultdict
     report = defaultdict(lambda: {
@@ -5811,6 +5900,16 @@ def admin_usage_report():
         return (inverted_month, user_type or "", username or "")
     for (month, username, user_type), data in sorted(report.items(), key=_usage_sort_key):
         avg_rules = round(data["alerts"] / data["statements"], 1) if data["statements"] else 0
+        avg_secs = speed_lookup.get((month, username, user_type), 0)
+        if avg_secs > 0:
+            if avg_secs < 60:
+                avg_time_str = f"{avg_secs:.1f}s"
+            elif avg_secs < 3600:
+                avg_time_str = f"{avg_secs/60:.1f}m"
+            else:
+                avg_time_str = f"{avg_secs/3600:.1f}h"
+        else:
+            avg_time_str = ""
         entry = {
             "month": month,
             "username": username,
@@ -5819,6 +5918,7 @@ def admin_usage_report():
             "records": data["records"],
             "alerts": data["alerts"],
             "avg_rules_per_statement": avg_rules,
+            "avg_processing_time": avg_time_str,
             "rule_breakdown": dict(data["rule_breakdown"]),
         }
         report_list.append(entry)
@@ -5837,7 +5937,10 @@ def admin_usage_report():
     return render_template("admin_usage_report.html",
                           report=report_list,
                           type_totals=dict(type_totals),
-                          all_rule_types=sorted(all_rule_types))
+                          all_rule_types=sorted(all_rule_types),
+                          processing_detail=processing_detail,
+                          all_speed_users=sorted(all_speed_users),
+                          all_speed_months=sorted(all_speed_months, reverse=True))
 
 
 # ---------- Admin: Templates ----------
@@ -5896,14 +5999,23 @@ def admin_templates():
 
         elif action == "reset_questions":
             cfg_set("tpl_question_bank", "")
+            log_audit_event("TEMPLATE_RESET", user["id"] if user else None,
+                            user.get("username") if user else None,
+                            details=json.dumps({"template": "question_bank"}))
             flash("Question templates reset to defaults.")
 
         elif action == "reset_outreach_email":
             cfg_set("tpl_outreach_email", "")
+            log_audit_event("TEMPLATE_RESET", user["id"] if user else None,
+                            user.get("username") if user else None,
+                            details=json.dumps({"template": "outreach_email"}))
             flash("Outreach email template reset to defaults.")
 
         elif action == "reset_rationale":
             cfg_set("tpl_rationale_structure", "")
+            log_audit_event("TEMPLATE_RESET", user["id"] if user else None,
+                            user.get("username") if user else None,
+                            details=json.dumps({"template": "rationale_structure"}))
             flash("Rationale template reset to defaults.")
 
         return redirect(url_for("admin_templates"))
@@ -5954,18 +6066,18 @@ def admin():
 
     # Rule toggles
     toggles = {
-        "prohibited_country": bool(cfg_get("cfg_rule_enabled_prohibited_country", True)),
-        "high_risk_corridor": bool(cfg_get("cfg_rule_enabled_high_risk_corridor", True)),
-        "median_outlier":     bool(cfg_get("cfg_rule_enabled_median_outlier", True)),
-        "nlp_risky_terms":    bool(cfg_get("cfg_rule_enabled_nlp_risky_terms", True)),
-        "expected_out":       bool(cfg_get("cfg_rule_enabled_expected_out", True)),
-        "expected_in":        bool(cfg_get("cfg_rule_enabled_expected_in", True)),
-        "cash_daily_breach":  bool(cfg_get("cfg_rule_enabled_cash_daily_breach", True)),
-        "severity_mapping":   bool(cfg_get("cfg_rule_enabled_severity_mapping", True)),
-        "structuring":        bool(cfg_get("cfg_rule_enabled_structuring", True)),
-        "flowthrough":        bool(cfg_get("cfg_rule_enabled_flowthrough", True)),
-        "dormancy":           bool(cfg_get("cfg_rule_enabled_dormancy", True)),
-        "velocity":           bool(cfg_get("cfg_rule_enabled_velocity", True)),
+        "prohibited_country": cfg_get_bool("cfg_rule_enabled_prohibited_country", True),
+        "high_risk_corridor": cfg_get_bool("cfg_rule_enabled_high_risk_corridor", True),
+        "median_outlier":     cfg_get_bool("cfg_rule_enabled_median_outlier", True),
+        "nlp_risky_terms":    cfg_get_bool("cfg_rule_enabled_nlp_risky_terms", True),
+        "expected_out":       cfg_get_bool("cfg_rule_enabled_expected_out", True),
+        "expected_in":        cfg_get_bool("cfg_rule_enabled_expected_in", True),
+        "cash_daily_breach":  cfg_get_bool("cfg_rule_enabled_cash_daily_breach", True),
+        "severity_mapping":   cfg_get_bool("cfg_rule_enabled_severity_mapping", True),
+        "structuring":        cfg_get_bool("cfg_rule_enabled_structuring", True),
+        "flowthrough":        cfg_get_bool("cfg_rule_enabled_flowthrough", True),
+        "dormancy":           cfg_get_bool("cfg_rule_enabled_dormancy", True),
+        "velocity":           cfg_get_bool("cfg_rule_enabled_velocity", True),
     }
 
     return render_template(
@@ -6020,6 +6132,8 @@ def admin_rule_params():
     cfg_set("cfg_ai_use_llm", bool(request.form.get("cfg_ai_use_llm")))
     cfg_set("cfg_ai_model", (request.form.get("cfg_ai_model") or "gemini-2.0-flash").strip())
 
+    log_audit_event("RULE_PARAMS_UPDATED", session.get("user_id"), session.get("username"),
+                    details="Rule parameters and Wolfsberg thresholds updated")
     flash("Rule parameters saved.")
     return redirect(url_for("admin") + "#rule-params")
 
@@ -6583,7 +6697,41 @@ def ai_analysis():
             rows = _attach_and_enrich([dict(r) for r in rows]) if rows else []
             rows = _dedupe_by_sentence(rows)
             outreach_text = _build_outreach_email(cust, rows)
+            # Persist the generated outreach email
+            db.execute("UPDATE ai_cases SET outreach_email_text=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                       (outreach_text, case_row["id"]))
+            db.commit()
+            user = get_current_user()
+            log_audit_event(
+                event_type="OUTREACH_EMAIL_GENERATED",
+                user_id=user["id"] if user else None,
+                username=user.get("username") if user else None,
+                details=json.dumps({"customer_id": cust, "case_id": case_row["id"]}),
+            )
             # fall through to GET rendering with outreach_text displayed
+
+        # -------- Save edited outreach email --------
+        if action == "save_outreach" and case_row:
+            edited_outreach = request.form.get("outreach_text", "")
+            old_outreach = case_row.get("outreach_email_text") or ""
+            if edited_outreach != old_outreach:
+                db.execute("UPDATE ai_cases SET outreach_email_text=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                           (edited_outreach, case_row["id"]))
+                db.commit()
+                user = get_current_user()
+                log_audit_event(
+                    event_type="OUTREACH_EMAIL_EDITED",
+                    user_id=user["id"] if user else None,
+                    username=user.get("username") if user else None,
+                    details=json.dumps({
+                        "customer_id": cust,
+                        "case_id": case_row["id"],
+                        "before": old_outreach,
+                        "after": edited_outreach,
+                    }),
+                )
+            flash("Outreach email saved.")
+            return redirect(url_for("ai_analysis", customer_id=cust, period=period))
 
         # -------- GET view (load answers or show preview if empty) --------
         if case_row and not outreach_text:
@@ -7790,6 +7938,14 @@ def admin_rule_toggles():
     cfg_set("cfg_rule_enabled_flowthrough",        flag("enable_flowthrough"))
     cfg_set("cfg_rule_enabled_dormancy",           flag("enable_dormancy"))
     cfg_set("cfg_rule_enabled_velocity",           flag("enable_velocity"))
+    # Build summary of which rules are enabled/disabled
+    toggle_summary = {k.replace("enable_", ""): bool(request.form.get(k))
+                      for k in ["enable_prohibited_country", "enable_high_risk_corridor", "enable_median_outlier",
+                                "enable_nlp_risky_terms", "enable_expected_out", "enable_expected_in",
+                                "enable_cash_daily_breach", "enable_severity_mapping", "enable_structuring",
+                                "enable_flowthrough", "enable_dormancy", "enable_velocity"]}
+    log_audit_event("RULE_TOGGLES_UPDATED", session.get("user_id"), session.get("username"),
+                    details=json.dumps(toggle_summary))
     flash("Rule toggles saved.")
     return redirect(url_for("admin") + "#builtin-rules")
 
@@ -7806,6 +7962,8 @@ def admin_keywords():
         if term and not any(t for t in items if (t.get("term") or "").lower() == term.lower()):
             items.append({"term": term, "enabled": True, "category": category})
             cfg_set("cfg_risky_terms2", items)
+            log_audit_event("KEYWORD_ADDED", session.get("user_id"), session.get("username"),
+                            details=json.dumps({"term": term, "category": category}))
             flash(f"Added keyword: {term}")
     elif action == "toggle":
         term = request.form.get("term")
@@ -7813,12 +7971,16 @@ def admin_keywords():
             if t.get("term") == term:
                 t["enabled"] = not bool(t.get("enabled"))
                 cfg_set("cfg_risky_terms2", items)
+                log_audit_event("KEYWORD_TOGGLED", session.get("user_id"), session.get("username"),
+                                details=json.dumps({"term": term, "enabled": t["enabled"]}))
                 flash(f"Toggled keyword: {term}")
                 break
     elif action == "delete":
         term = request.form.get("term")
         new_items = [t for t in items if t.get("term") != term]
         cfg_set("cfg_risky_terms2", new_items)
+        log_audit_event("KEYWORD_DELETED", session.get("user_id"), session.get("username"),
+                        details=json.dumps({"term": term}))
         flash(f"Removed keyword: {term}")
     else:
         flash("Unknown action.")
@@ -7833,6 +7995,8 @@ def admin_keywords_bulk():
 
     if action == "wipe":
         cfg_set("cfg_risky_terms2", [])
+        log_audit_event("KEYWORDS_WIPED", session.get("user_id"), session.get("username"),
+                        details="All keywords wiped")
         flash("All keywords wiped.")
         return redirect(url_for("admin") + "#keyword-library")
 
@@ -7933,6 +8097,8 @@ def admin_keywords_bulk():
             imported += 1
 
         cfg_set("cfg_risky_terms2", existing)
+        log_audit_event("KEYWORDS_BULK_IMPORTED", session.get("user_id"), session.get("username"),
+                        details=json.dumps({"imported": imported, "skipped": skipped, "auto_disabled": auto_disabled}))
 
         parts = [f"Imported {imported} keyword(s)"]
         if auto_disabled:
@@ -7984,6 +8150,8 @@ def admin_wipe():
     except psycopg2.Error:
         pass
 
+    log_audit_event("DATA_WIPED", session.get("user_id"), session.get("username"),
+                    details=json.dumps({"transactions": n_tx, "alerts": n_alerts, "statements": n_stmts}))
     flash(f"Wiped {n_tx} transactions, {n_alerts} alerts, and {n_stmts} statements. Any AI cases/answers were cleared.")
     return redirect(url_for("admin") + "#danger")
 
@@ -8026,9 +8194,12 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
         name='ReportTitle',
         parent=styles['Heading1'],
         fontSize=18,
-        spaceAfter=6,
-        textColor=colors.HexColor('#1a365d'),
-        alignment=TA_CENTER
+        spaceAfter=0,
+        spaceBefore=0,
+        textColor=colors.HexColor('#A0AEC0'),
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold',
+        leading=24,
     ))
     styles.add(ParagraphStyle(
         name='SectionHeader',
@@ -8075,12 +8246,25 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
     
     elements = []
     
-    # --- Header ---
-    elements.append(Paragraph("TRANSACTION REVIEW REPORT", styles['ReportTitle']))
-    elements.append(Paragraph("Confidential - For Compliance Use Only", styles['SmallText']))
-    elements.append(Spacer(1, 4*mm))
-    elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#e2e8f0')))
-    elements.append(Spacer(1, 4*mm))
+    # --- Header Banner (Agora navy with grey text) ---
+    header_title = Paragraph('<font color="#CBD5E0"><b>TRANSACTION REVIEW REPORT</b></font>',
+        ParagraphStyle('HeaderTitle', fontSize=18, alignment=TA_CENTER, leading=24,
+                       textColor=colors.HexColor('#CBD5E0'), spaceBefore=0, spaceAfter=0))
+    header_sub = Paragraph(
+        '<font color="#A0AEC0" size="8">Confidential - For Compliance Use Only</font>',
+        ParagraphStyle('HeaderSub', alignment=TA_CENTER, spaceBefore=0, spaceAfter=0)
+    )
+    header_table = Table([[header_title], [header_sub]], colWidths=[doc.width])
+    header_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#2C3F4F')),
+        ('TOPPADDING', (0, 0), (-1, 0), 14),
+        ('BOTTOMPADDING', (0, -1), (-1, -1), 12),
+        ('LEFTPADDING', (0, 0), (-1, -1), 16),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 16),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    elements.append(header_table)
+    elements.append(Spacer(1, 6*mm))
     
     # --- Section 1: Review Metadata ---
     elements.append(Paragraph("1. REVIEW DETAILS", styles['SectionHeader']))
@@ -8144,7 +8328,7 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
     
     # Get rationale data for nature of business and estimates
     rationale_row = db.execute("""
-        SELECT nature_of_business, est_income, est_expenditure,
+        SELECT nature_of_business, est_income, est_expenditure, rationale_text,
                reviewer_confirmed, reviewer_confirmed_by, reviewer_confirmed_at, reviewer_confirmed_type
         FROM ai_rationales
         WHERE customer_id = ?
@@ -8370,15 +8554,18 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
                 tag = xml_escape((ans['tag'] or '').replace('_', ' ').title())
                 question = xml_escape(ans['question'] or '')
                 answer = ans['answer'] or ''
+                is_nr = bool(ans['not_required']) if ans['not_required'] is not None else False
 
                 elements.append(Paragraph(f"<b>Q{idx} ({tag}):</b> {question}", styles['BodyTextJustified']))
 
-                if ans.get('not_required'):
-                    nr_rationale = xml_escape((ans.get('not_required_rationale') or '').strip())
-                    nr_text = f"<b>A{idx}:</b> <i>[Not Required]</i>"
+                if is_nr:
+                    nr_rationale = xml_escape((ans['not_required_rationale'] or '').strip()) if ans['not_required_rationale'] else ''
+                    nr_text = f"<b>A{idx}: [Not Required]</b>"
                     if nr_rationale:
-                        nr_text += f" — Rationale: <i>{nr_rationale}</i>"
-                    elements.append(Paragraph(nr_text, styles['SmallText']))
+                        nr_text += f"<br/><i>Reason: {nr_rationale}</i>"
+                    else:
+                        nr_text += f"<br/><i>No rationale provided.</i>"
+                    elements.append(Paragraph(nr_text, styles['BodyTextJustified']))
                 elif answer.strip():
                     elements.append(Paragraph(f"<b>A{idx}:</b> {xml_escape(answer)}", styles['BodyTextJustified']))
                 else:
@@ -8433,20 +8620,73 @@ def _generate_customer_report_pdf(customer_id: str, reviewer_name: str, summary_
             ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
         ]))
         elements.append(confirm_table)
-    else:
+
+    # Audit trail for reviewer confirmation changes
+    audit_rows = db.execute("""
+        SELECT username, created_at, details FROM audit_log
+        WHERE event_type = 'REVIEWER_CONFIRMATION' AND details LIKE ?
+        ORDER BY created_at DESC
+    """, (f'%"customer_id": "{customer_id}"%',)).fetchall()
+    if audit_rows:
+        elements.append(Spacer(1, 2*mm))
+        elements.append(Paragraph("<b>Confirmation Audit Trail</b>", styles['SmallText']))
+        audit_data = [['Date/Time', 'User', 'Action']]
+        for ar in audit_rows:
+            try:
+                details = json.loads(ar['details']) if ar['details'] else {}
+            except Exception:
+                details = {}
+            confirmed = details.get('confirmed', False)
+            conf_type = details.get('type', '')
+            if confirmed:
+                action_text = f"Confirmed as {conf_type}" if conf_type else "Confirmed"
+            else:
+                action_text = "Confirmation removed"
+            at_str = ''
+            if ar['created_at']:
+                try:
+                    at_val = ar['created_at']
+                    if isinstance(at_val, datetime):
+                        at_str = at_val.strftime('%d/%m/%Y %H:%M')
+                    else:
+                        at_str = str(at_val)[:16]
+                except Exception:
+                    at_str = str(ar['created_at'])[:16]
+            audit_data.append([at_str, ar['username'] or 'Unknown', action_text])
+        audit_table = Table(audit_data, colWidths=[120, 120, 200])
+        audit_table.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#4a5568')),
+            ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor('#718096')),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.HexColor('#e2e8f0')),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        elements.append(audit_table)
+
+    if not reviewer_confirmed and not audit_rows:
         elements.append(Paragraph(
             "<i>Reviewer has not yet confirmed whether customer activity is consistent with the customer profile.</i>",
             styles['SmallText']))
 
     elements.append(Spacer(1, 4*mm))
 
-    # --- Section 7: Summary Comments ---
-    elements.append(Paragraph("7. REVIEWER COMMENTS & CONCLUSION", styles['SectionHeader']))
+    # --- Section 7: Rationale & Conclusion ---
+    elements.append(Paragraph("7. RATIONALE & CONCLUSION", styles['SectionHeader']))
 
-    if summary_comments and summary_comments.strip():
-        elements.append(Paragraph(summary_comments, styles['BodyTextJustified']))
+    _rationale_text = safe_get(rationale_row, 'rationale_text', '') if rationale_row else ''
+    # Strip Q&A section to avoid duplication with Section 5
+    _qa_marker = "--- Outreach Questions & Responses ---"
+    if _rationale_text and _qa_marker in _rationale_text:
+        _rationale_text = _rationale_text[:_rationale_text.index(_qa_marker)].rstrip()
+    if _rationale_text and _rationale_text.strip():
+        for line in _rationale_text.strip().split('\n'):
+            if line.strip():
+                elements.append(Paragraph(line, styles['SmallText']))
     else:
-        elements.append(Paragraph("<i>No summary comments provided.</i>", styles['SmallText']))
+        elements.append(Paragraph("<i>No rationale has been generated for this customer.</i>", styles['SmallText']))
     
     elements.append(Spacer(1, 6*mm))
     

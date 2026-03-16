@@ -101,10 +101,39 @@
 <div class="card mb-3">
   <div class="card-header fw-semibold">Draft Outreach Email</div>
   <div class="card-body">
-    <p class="text-muted small mb-2">Copy/paste into your email tool (or export later):</p>
-    <pre class="mb-0" style="white-space: pre-wrap;">{{ outreach_text }}</pre>
+    <p class="text-muted small mb-2">Edit below then save or copy/paste into your email tool:</p>
+    <form method="post" id="outreachForm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="customer_id" value="{{ customer_id or '' }}">
+      <input type="hidden" name="period" value="all">
+      <input type="hidden" name="case_id" value="{{ case.id if case else '' }}">
+      <input type="hidden" name="action" value="save_outreach">
+      <textarea class="form-control mb-3" id="outreachText" name="outreach_text" rows="16"
+                style="font-size: 0.85rem; line-height: 1.6;">{{ outreach_text }}</textarea>
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary btn-sm">
+          <i class="bi bi-floppy me-1"></i>Save Changes
+        </button>
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="copyOutreach">
+          <i class="bi bi-clipboard me-1"></i>Copy to clipboard
+        </button>
+      </div>
+    </form>
   </div>
 </div>
+<script>
+document.getElementById('copyOutreach').addEventListener('click', async function() {
+  var el = document.getElementById('outreachText');
+  try {
+    await navigator.clipboard.writeText(el.value);
+    this.innerHTML = '<i class="bi bi-check-lg me-1"></i>Copied!';
+    setTimeout(() => { this.innerHTML = '<i class="bi bi-clipboard me-1"></i>Copy to clipboard'; }, 1500);
+  } catch (e) {
+    el.select();
+    document.execCommand('copy');
+  }
+});
+</script>
 {% endif %}
 
 {% endif %}

@@ -59,17 +59,15 @@
   <div class="card">
     <div class="card-body p-0">
       <div class="table-responsive">
-        <table class="table table-hover align-middle mb-0">
+        <table class="table table-hover align-middle mb-0" style="font-size: 0.8rem;">
           <thead class="table-light">
             <tr>
               <th scope="col" class="u-nowrap">Txn Date</th>
               <th scope="col" class="u-nowrap">Txn ID</th>
-              <th scope="col">Customer</th>
               <th scope="col">Account</th>
-              <th scope="col">Country</th>
-              <th scope="col" class="text-end" class="u-w-90">Score</th>
+              <th scope="col" class="text-end">Score</th>
               <th scope="col" class="u-nowrap">Severity</th>
-              <th scope="col">Reasons</th>
+              <th scope="col" style="width: 45%;">Reasons</th>
               <th scope="col" class="u-nowrap">Alert Created</th>
             </tr>
           </thead>
@@ -79,14 +77,7 @@
               <tr>
                 <td class="u-nowrap">{{ a.txn_date_uk or a.txn_date or '—' }}</td>
                 <td class="u-nowrap">{{ a.txn_id }}</td>
-                <td>
-                  {% set cust = a.customer_id %}
-                  <a href="{{ url_for('explore', customer_id=cust) }}" class="text-decoration-none">
-                    {{ cust }}
-                  </a>
-                </td>
                 <td>{{ a.account_name or '—' }}</td>
-                <td class="u-nowrap">{{ a.country_iso2 or '—' }}</td>
                 <td class="text-end">{{ a.score }}</td>
                 <td class="u-nowrap">
                   {% set s = (a.severity or '').upper() %}
@@ -110,7 +101,7 @@
             {% endfor %}
           {% else %}
             <tr>
-              <td colspan="9" class="text-center text-muted py-5">
+              <td colspan="7" class="text-center text-muted py-5">
                 No alerts match the current filters.
               </td>
             </tr>

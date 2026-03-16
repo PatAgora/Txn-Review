@@ -52,16 +52,17 @@
 
     {% if report %}
     <div class="table-responsive">
-      <table class="table table-sm table-striped align-middle">
+      <table class="table table-sm table-striped align-middle" style="font-size: 0.8rem;">
         <thead class="table-light">
           <tr>
-            <th>Month</th>
-            <th>User</th>
-            <th>Type</th>
-            <th class="text-end">Statements Uploaded</th>
-            <th class="text-end">Transaction Records</th>
-            <th class="text-end">Rules Fired</th>
-            <th class="text-end">Avg Rules / Statement</th>
+            <th class="text-nowrap">Month</th>
+            <th class="text-nowrap">User</th>
+            <th class="text-nowrap">Type</th>
+            <th class="text-end text-nowrap">Statements</th>
+            <th class="text-end text-nowrap">Records</th>
+            <th class="text-end text-nowrap">Rules Fired</th>
+            <th class="text-end text-nowrap">Avg Rules/Stmt</th>
+            <th class="text-end text-nowrap">Avg Processing</th>
           </tr>
         </thead>
         <tbody>
@@ -80,6 +81,7 @@
             <td class="text-end">{{ row.records }}</td>
             <td class="text-end">{{ row.alerts }}</td>
             <td class="text-end">{{ row.avg_rules_per_statement }}</td>
+            <td class="text-end fw-bold">{{ row.avg_processing_time or '—' }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -97,14 +99,14 @@
   <div class="card-body">
     <h5 class="card-title mb-3">Rules Fired by Type</h5>
     <div class="table-responsive">
-      <table class="table table-sm table-striped align-middle">
+      <table class="table table-sm table-striped align-middle" style="font-size: 0.8rem;">
         <thead class="table-light">
           <tr>
-            <th>Month</th>
-            <th>User</th>
-            <th>Type</th>
+            <th class="text-nowrap">Month</th>
+            <th class="text-nowrap">User</th>
+            <th class="text-nowrap">Type</th>
             {% for rt in all_rule_types %}
-            <th class="text-end">{{ rt | replace('_', ' ') | title }}</th>
+            <th class="text-end text-nowrap">{{ rt | replace('_', ' ') | title }}</th>
             {% endfor %}
           </tr>
         </thead>
@@ -133,5 +135,108 @@
   </div>
 </div>
 {% endif %}
+
+<!-- Statement Processing Performance -->
+<div class="card mt-4">
+  <div class="card-body">
+    <h5 class="card-title mb-3">Statement Processing Performance</h5>
+
+    <!-- Filters -->
+    <div class="row g-2 mb-3 align-items-end">
+      <div class="col-auto">
+        <label class="form-label small">User</label>
+        <select class="form-select form-select-sm" id="speedFilterUser" onchange="filterSpeedTable()">
+          <option value="">All Users</option>
+          {% for u in all_speed_users %}
+          <option value="{{ u }}">{{ u }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small">Month</label>
+        <select class="form-select form-select-sm" id="speedFilterMonth" onchange="filterSpeedTable()">
+          <option value="">All Months</option>
+          {% for m in all_speed_months %}
+          <option value="{{ m }}">{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-auto">
+        <label class="form-label small">Sort By</label>
+        <select class="form-select form-select-sm" id="speedSortBy" onchange="filterSpeedTable()">
+          <option value="month">Month (newest first)</option>
+          <option value="user">User</option>
+          <option value="statements">Statements (highest)</option>
+          <option value="avg">Avg Processing (fastest)</option>
+        </select>
+      </div>
+    </div>
+
+    {% if processing_detail %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle" style="font-size: 0.8rem;" id="speedTable">
+        <thead class="table-light">
+          <tr>
+            <th class="text-nowrap">User</th>
+            <th class="text-nowrap">Month</th>
+            <th class="text-end text-nowrap">Statements</th>
+            <th class="text-end text-nowrap">Records</th>
+            <th class="text-end text-nowrap">Avg Time</th>
+            <th class="text-end text-nowrap">Fastest</th>
+            <th class="text-end text-nowrap">Slowest</th>
+          </tr>
+        </thead>
+        <tbody id="speedTableBody">
+          {% for s in processing_detail %}
+          <tr data-user="{{ s.username }}" data-month="{{ s.month }}"
+              data-statements="{{ s.statements }}" data-avg="{{ s.avg }}">
+            <td>{{ s.username }}</td>
+            <td class="text-nowrap"><strong>{{ s.month }}</strong></td>
+            <td class="text-end">{{ s.statements }}</td>
+            <td class="text-end">{{ s.records }}</td>
+            <td class="text-end fw-bold">{{ s.avg }}</td>
+            <td class="text-end text-success">{{ s.min }}</td>
+            <td class="text-end text-danger">{{ s.max }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-muted">No processing data yet. Upload and score statements to populate this section.</p>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+function filterSpeedTable() {
+  var user = document.getElementById('speedFilterUser').value;
+  var month = document.getElementById('speedFilterMonth').value;
+  var sortBy = document.getElementById('speedSortBy').value;
+  var tbody = document.getElementById('speedTableBody');
+  if (!tbody) return;
+  var rows = Array.from(tbody.querySelectorAll('tr'));
+
+  rows.forEach(function(r) {
+    var show = true;
+    if (user && r.dataset.user !== user) show = false;
+    if (month && r.dataset.month !== month) show = false;
+    r.style.display = show ? '' : 'none';
+  });
+
+  // Sort visible rows
+  var visible = rows.filter(function(r) { return r.style.display !== 'none'; });
+  visible.sort(function(a, b) {
+    if (sortBy === 'user') return a.dataset.user.localeCompare(b.dataset.user);
+    if (sortBy === 'statements') return parseInt(b.dataset.statements) - parseInt(a.dataset.statements);
+    if (sortBy === 'avg') {
+      var parse = function(s) { if (!s || s === '—') return 9999; var n = parseFloat(s); if (s.endsWith('m')) return n*60; if (s.endsWith('h')) return n*3600; return n; };
+      return parse(a.dataset.avg) - parse(b.dataset.avg);
+    }
+    return b.dataset.month.localeCompare(a.dataset.month); // month desc
+  });
+  visible.forEach(function(r) { tbody.appendChild(r); });
+}
+</script>
 
 {% endblock %}
