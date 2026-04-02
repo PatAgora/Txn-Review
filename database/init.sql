@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_customer ON alerts (customer_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts (severity, created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_txn_id ON alerts (txn_id);
 
 
 -- rules (for Excel-driven or Admin-managed rules catalogue)
