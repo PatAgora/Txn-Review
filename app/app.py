@@ -1,4 +1,4 @@
-import os, csv, io, json, tempfile
+import os, csv, io, json, tempfile, shutil
 import time
 import stat
 from datetime import datetime, date, timedelta
@@ -54,6 +54,8 @@ def get_db_connection_string():
     return f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_USER} password={DB_PASSWORD}"
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+UPLOADS_DIR = os.path.join(os.path.dirname(__file__), 'uploads')
+os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 # ---------- Database wrapper for SQLite <-> PostgreSQL compatibility ----------
 class DBWrapper:
@@ -1409,6 +1411,13 @@ def ensure_statements_table():
     if not _column_exists('statements', 'scored_at'):
         try:
             db.execute("ALTER TABLE statements ADD COLUMN scored_at TIMESTAMP;")
+            db.commit()
+        except Exception:
+            db.rollback()
+    # Add file_path for original uploaded file storage
+    if not _column_exists('statements', 'file_path'):
+        try:
+            db.execute("ALTER TABLE statements ADD COLUMN file_path TEXT;")
             db.commit()
         except Exception:
             db.rollback()
@@ -4950,6 +4959,12 @@ def upload():
                 # Get statement info for audit log
                 stmt = db.execute("SELECT * FROM statements WHERE id=?", (stmt_id,)).fetchone()
                 if stmt:
+                    # Remove original uploaded file from disk if stored
+                    if stmt.get("file_path"):
+                        try:
+                            os.unlink(stmt["file_path"])
+                        except OSError:
+                            pass
                     # Delete transactions that belong to this statement
                     db.execute("DELETE FROM alerts WHERE txn_id IN (SELECT id FROM transactions WHERE statement_id=?)", (stmt_id,))
                     db.execute("DELETE FROM transactions WHERE statement_id=?", (stmt_id,))
@@ -5073,6 +5088,18 @@ def upload():
             except Exception:
                 os.close(tmp_fd)
                 raise
+
+            # Store a permanent copy of the original file for future retrieval
+            try:
+                cust_upload_dir = os.path.join(UPLOADS_DIR, customer_id)
+                os.makedirs(cust_upload_dir, exist_ok=True)
+                safe_filename = f"{stmt_id}_{tx_file.filename}"
+                permanent_path = os.path.join(cust_upload_dir, safe_filename)
+                shutil.copy2(tmp_path, permanent_path)
+                db.execute("UPDATE statements SET file_path=? WHERE id=?", (permanent_path, stmt_id))
+                db.commit()
+            except Exception as e:
+                app.logger.warning(f"Could not store original file for statement {stmt_id}: {e}")
 
             # Submit ingest + scoring to background thread — returns immediately
             submit_ingest_and_score(
@@ -5467,6 +5494,10 @@ def admin_customers():
             cust_id = request.form.get("customer_id", "").strip()
             if cust_id:
                 try:
+                    # Remove original uploaded files from disk
+                    cust_upload_dir = os.path.join(UPLOADS_DIR, cust_id)
+                    if os.path.isdir(cust_upload_dir):
+                        shutil.rmtree(cust_upload_dir, ignore_errors=True)
                     db.execute("DELETE FROM alerts WHERE customer_id=?", (cust_id,))
                     db.execute("DELETE FROM transactions WHERE customer_id=?", (cust_id,))
                     db.execute("DELETE FROM statements WHERE customer_id=?", (cust_id,))
@@ -8132,6 +8163,12 @@ def admin_wipe():
 
     n_stmts = db.execute("SELECT COUNT(*) c FROM statements").fetchone()["c"]
 
+    # Remove all original uploaded files from disk
+    for entry in os.listdir(UPLOADS_DIR):
+        entry_path = os.path.join(UPLOADS_DIR, entry)
+        if os.path.isdir(entry_path):
+            shutil.rmtree(entry_path, ignore_errors=True)
+
     # Delete dependents first
     db.execute("DELETE FROM alerts;")
     db.execute("DELETE FROM transactions;")
@@ -8158,6 +8195,25 @@ def admin_wipe():
 @app.route("/sample/<path:name>")
 def download_sample(name):
     return send_from_directory(DATA_DIR, name, as_attachment=True)
+
+
+@app.route("/statement/<int:stmt_id>/download")
+@login_required
+def download_statement_file(stmt_id):
+    """Serve the original uploaded statement file."""
+    db = get_db()
+    stmt = db.execute("SELECT file_path, filename FROM statements WHERE id=?", (stmt_id,)).fetchone()
+    if not stmt or not stmt["file_path"]:
+        flash("Original file not available for this statement.")
+        return redirect(request.referrer or url_for("upload"))
+    file_path = stmt["file_path"]
+    if not os.path.isfile(file_path):
+        flash("Original file no longer exists on disk.")
+        return redirect(request.referrer or url_for("upload"))
+    directory = os.path.dirname(file_path)
+    basename = os.path.basename(file_path)
+    return send_from_directory(directory, basename, as_attachment=True,
+                               download_name=stmt["filename"])
 
 
 # --- PDF Report Generation ---

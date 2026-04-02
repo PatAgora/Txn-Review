@@ -163,7 +163,8 @@ CREATE TABLE IF NOT EXISTS statements (
   uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   record_count INTEGER,
   date_from DATE,
-  date_to DATE
+  date_to DATE,
+  file_path TEXT
 );
 
 -- ref_bank_country (for CBS bank-name → country lookup)

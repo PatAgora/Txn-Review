@@ -193,6 +193,7 @@
             <th>Uploaded At</th>
             <th>Records</th>
             <th>Date Range</th>
+            <th>Original</th>
           </tr>
         </thead>
         <tbody>
@@ -208,6 +209,15 @@
                 {{ s.date_from }} to {{ s.date_to }}
               {% else %}
                 —
+              {% endif %}
+            </td>
+            <td>
+              {% if s.file_path %}
+                <a href="{{ url_for('download_statement_file', stmt_id=s.id) }}" class="btn btn-sm btn-outline-secondary" title="Download original file">
+                  <i class="bi bi-download"></i>
+                </a>
+              {% else %}
+                <span class="text-muted">—</span>
               {% endif %}
             </td>
           </tr>
